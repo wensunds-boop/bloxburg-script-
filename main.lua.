@@ -1,6 +1,6 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.0  ·  Bloxburg client tuning suite
+  Venice Speed Suite  v1.1  ·  Bloxburg client tuning suite
   Author: Venice
   License: MIT — no telemetry, no HTTP calls beyond the loader,
            no hidden downloads, no backdoors.
@@ -11,9 +11,21 @@
       controller stomps it. Expect the server to correct you on
       teleport-like values (>250).
     · Vehicle tuning writes MaxSpeed/MaxTorque/attributes AND runs an
-      optional velocity-assist layer. The assist layer is what moves
-      the car; the writes alone are usually overwritten.
+      optional line-mode LinearVelocity assist. The assist is what
+      actually moves the car; the property writes alone are usually
+      overwritten by the car's own script.
     · Zones are AABB boxes in world space — fully functional here.
+  ---------------------------------------------------------------------
+  v1.1 CHANGES
+    · zone radius/limit fields no longer buried under the add button
+    · zone list no longer overflows its card
+    · placeholder labels no longer accumulate
+    · hold mode engages on a rolling car and accelerates (accel slider
+      is now live)
+    · assist switched to line-mode LinearVelocity — keeps steering,
+      keeps gravity, no direct velocity stomping
+    · accent + keybind persist correctly
+    · zone badge given real dimensions
 =====================================================================]]
 
 local Players           = game:GetService("Players")
@@ -22,16 +34,13 @@ local UserInputService  = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
 local HttpService       = game:GetService("HttpService")
 
-local LP       = Players.LocalPlayer
+local LP        = Players.LocalPlayer
 local PlayerGui = LP:WaitForChild("PlayerGui", 30)
 
 if not PlayerGui then
     return warn("[Venice] PlayerGui never appeared.")
 end
 
---=====================================================================
--- SINGLETON
---=====================================================================
 if _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.teardown then
     pcall(_G.__VeniceSpeedSuite.teardown)
 end
@@ -60,46 +69,97 @@ local state = deepCopy(DEFAULTS)
 
 local hasFS = pcall(function() return writefile ~= nil end)
 
+local function num(v, fallback, min, max)
+    if type(v) ~= "number" or v ~= v then return fallback end
+    return math.clamp(v, min, max)
+end
+
 local function loadConfig()
     if not hasFS then return end
-    local ok, raw = pcall(function() return readfile(CONFIG_FILE) end)
+    local ok, raw = pcall(readfile, CONFIG_FILE)
     if not ok or type(raw) ~= "string" or #raw < 2 then return end
     local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok2 or type(data) ~= "table" then return end
-    for section, values in pairs(DEFAULTS) do
-        if type(data[section]) == "table" then
-            for key, def in pairs(values) do
-                local v = data[section][key]
-                if type(v) == type(def) then
-                    state[section][key] = v
-                elseif typeof and typeof(def) == "Color3" and type(v) == "table" then
-                    local okc, c = pcall(Color3.fromRGB, v[1], v[2], v[3])
-                    if okc then state[section][key] = c end
+
+    local p = data.player
+    if type(p) == "table" then
+        if type(p.enabled) == "boolean" then state.player.enabled = p.enabled end
+        state.player.speed = num(p.speed, DEFAULTS.player.speed, 16, 300)
+        if type(p.jumpEnabled) == "boolean" then state.player.jumpEnabled = p.jumpEnabled end
+        state.player.jump = num(p.jump, DEFAULTS.player.jump, 30, 220)
+    end
+
+    local v = data.vehicle
+    if type(v) == "table" then
+        if type(v.enabled) == "boolean" then state.vehicle.enabled = v.enabled end
+        state.vehicle.maxSpeed = num(v.maxSpeed, DEFAULTS.vehicle.maxSpeed, 30, 600)
+        state.vehicle.accel = num(v.accel, DEFAULTS.vehicle.accel, 20, 600)
+        state.vehicle.brake = num(v.brake, DEFAULTS.vehicle.brake, 40, 900)
+        if type(v.assist) == "boolean" then state.vehicle.assist = v.assist end
+    end
+
+    local l = data.limits
+    if type(l) == "table" then
+        if type(l.enabled) == "boolean" then state.limits.enabled = l.enabled end
+        state.limits.global = num(l.global, DEFAULTS.limits.global, 16, 300)
+        if type(l.zones) == "table" then
+            local clean = {}
+            for _, z in ipairs(l.zones) do
+                if type(z) == "table" and type(z.min) == "table" and type(z.max) == "table"
+                    and type(z.limit) == "number" then
+                    table.insert(clean, {
+                        name = type(z.name) == "string" and z.name or "Zone",
+                        min = { X = z.min.X or 0, Y = z.min.Y or 0, Z = z.min.Z or 0 },
+                        max = { X = z.max.X or 0, Y = z.max.Y or 0, Z = z.max.Z or 0 },
+                        limit = math.clamp(z.limit, 5, 300),
+                    })
                 end
             end
+            state.limits.zones = clean
         end
     end
-    if type(state.limits.zones) == "table" then
-        local clean = {}
-        for _, z in ipairs(state.limits.zones) do
-            if type(z) == "table" and z.min and z.max and z.limit then
-                table.insert(clean, z)
-            end
+
+    local u = data.ui
+    if type(u) == "table" then
+        if type(u.accent) == "table" then
+            local okc, c = pcall(Color3.fromRGB, u.accent[1] or 94, u.accent[2] or 141, u.accent[3] or 255)
+            if okc then state.ui.accent = c end
         end
-        state.limits.zones = clean
-    else
-        state.limits.zones = {}
+        if type(u.keybind) == "string" then
+            local oke, key = pcall(function() return Enum.KeyCode[u.keybind] end)
+            if oke and key then state.ui.keybind = key end
+        end
     end
+end
+
+local function snapshot()
+    return {
+        player  = { enabled = state.player.enabled, speed = state.player.speed,
+                    jumpEnabled = state.player.jumpEnabled, jump = state.player.jump },
+        vehicle = { enabled = state.vehicle.enabled, maxSpeed = state.vehicle.maxSpeed,
+                    accel = state.vehicle.accel, brake = state.vehicle.brake,
+                    assist = state.vehicle.assist },
+        limits  = { enabled = state.limits.enabled, global = state.limits.global,
+                    zones = state.limits.zones },
+        ui      = {
+            accent = {
+                math.floor(state.ui.accent.R * 255 + 0.5),
+                math.floor(state.ui.accent.G * 255 + 0.5),
+                math.floor(state.ui.accent.B * 255 + 0.5),
+            },
+            keybind = state.ui.keybind.Name,
+        },
+    }
 end
 
 local saveToken = 0
 local function saveConfig()
     if not hasFS then return end
     saveToken += 1
-    local myToken = saveToken
+    local mine = saveToken
     task.delay(0.6, function()
-        if myToken ~= saveToken then return end
-        local ok, encoded = pcall(function() return HttpService:JSONEncode(state) end)
+        if mine ~= saveToken then return end
+        local ok, encoded = pcall(function() return HttpService:JSONEncode(snapshot()) end)
         if ok then pcall(writefile, CONFIG_FILE, encoded) end
     end)
 end
@@ -121,9 +181,12 @@ local function acc(inst, prop)
     return inst
 end
 
+local clearAssistRig
+
 local function teardown()
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     table.clear(connections)
+    if clearAssistRig then pcall(clearAssistRig) end
     if _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.gui then
         pcall(function() _G.__VeniceSpeedSuite.gui:Destroy() end)
     end
@@ -218,7 +281,6 @@ local win = new("Frame", {
 corner(win, 14)
 stroke(win, C.stroke, 1)
 
--- entrance animation
 win.Size = UDim2.new(0, WIN_W, 0, 0)
 tw(win, 0.28, { Size = UDim2.new(0, WIN_W, 0, WIN_H) }, Enum.EasingStyle.Back)
 
@@ -232,7 +294,7 @@ local header = new("Frame", {
     BorderSizePixel = 0,
 }, win)
 
-local headerGrad = new("UIGradient", {
+new("UIGradient", {
     Color = ColorSequence.new({
         ColorSequenceKeypoint.new(0, C.bg),
         ColorSequenceKeypoint.new(1, C.panel),
@@ -256,7 +318,7 @@ local accentBar = new("Frame", {
 corner(accentBar, 2)
 acc(accentBar, "BackgroundColor3")
 
-local title = new("TextLabel", {
+new("TextLabel", {
     Size = UDim2.new(1, -140, 0, 20),
     Position = UDim2.new(0, 18, 0, 12),
     BackgroundTransparency = 1,
@@ -267,7 +329,7 @@ local title = new("TextLabel", {
     Text = "Venice Speed Suite",
 }, header)
 
-local subtitle = new("TextLabel", {
+new("TextLabel", {
     Size = UDim2.new(1, -140, 0, 14),
     Position = UDim2.new(0, 18, 0, 32),
     BackgroundTransparency = 1,
@@ -275,7 +337,7 @@ local subtitle = new("TextLabel", {
     TextSize = 10,
     TextColor3 = C.dim,
     TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "Bloxburg · client tuning",
+    Text = "Bloxburg · client tuning · v1.1",
 }, header)
 
 local function headerButton(glyph, xOffset, color)
@@ -303,7 +365,7 @@ local function headerButton(glyph, xOffset, color)
     return btn
 end
 
-local minBtn  = headerButton("–", -68, C.dim)
+local minBtn   = headerButton("–", -68, C.dim)
 local closeBtn = headerButton("×", -36, C.bad)
 
 -----------------------------------------------------------------------
@@ -345,7 +407,7 @@ local toastHolder = new("Frame", {
     BackgroundTransparency = 1,
 }, gui)
 
-local toastLayout = new("UIListLayout", {
+new("UIListLayout", {
     SortOrder = Enum.SortOrder.LayoutOrder,
     VerticalAlignment = Enum.VerticalAlignment.Bottom,
     Padding = UDim.new(0, 6),
@@ -378,9 +440,6 @@ local function notify(text, kind)
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = text,
     }, box)
-    box.BackgroundTransparency = 1
-    box.Position = UDim2.new(0, 14, 0, 0)
-    tw(box, 0.18, { BackgroundTransparency = 0, Position = UDim2.new(0, 0, 0, 0) })
     task.delay(2.6, function()
         local t = tw(box, 0.2, { BackgroundTransparency = 1 })
         t.Completed:Connect(function() box:Destroy() end)
@@ -398,7 +457,7 @@ local tabBar = new("Frame", {
 }, win)
 corner(tabBar, 9)
 
-local tabLayout = new("UIListLayout", {
+new("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal,
     SortOrder = Enum.SortOrder.LayoutOrder,
     Padding = UDim.new(0, 4),
@@ -418,7 +477,7 @@ local pages, tabButtons = {}, {}
 
 local function buildTab(name, order)
     local btn = new("TextButton", {
-        Size = UDim2.new(0, 0, 1, -8),
+        Size = UDim2.new(0, #name * 7 + 30, 1, -8),
         BackgroundColor3 = C.panel,
         BorderSizePixel = 0,
         AutoButtonColor = false,
@@ -428,13 +487,10 @@ local function buildTab(name, order)
         TextColor3 = C.dim,
         Text = name,
     }, tabBar)
-    local pad = new("UIPadding", {
+    new("UIPadding", {
         PaddingLeft = UDim.new(0, 14),
         PaddingRight = UDim.new(0, 14),
     }, btn)
-    new("UISizeConstraint", { MinSize = Vector2.new(0, 0) }, btn)
-    local w = #name * 7 + 30
-    btn.Size = UDim2.new(0, w, 1, -8)
     corner(btn, 7)
 
     local page = new("ScrollingFrame", {
@@ -465,12 +521,12 @@ local function buildTab(name, order)
             })
         end
     end))
-    return btn, page
+    return page
 end
 
-local playerTab, playerPage   = buildTab("Player", 1)
-local vehicleTab, vehiclePage = buildTab("Vehicle", 2)
-local settingsTab, settingsPage = buildTab("Settings", 3)
+local playerPage   = buildTab("Player", 1)
+local vehiclePage  = buildTab("Vehicle", 2)
+local settingsPage = buildTab("Settings", 3)
 
 --=====================================================================
 -- WIDGETS
@@ -487,11 +543,11 @@ local function card(parent, height, order)
     return box
 end
 
-local function sectionLabel(parent, text, order)
+local function sectionLabel(parent, text, y)
     return new("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 14),
+        Size = UDim2.new(1, -24, 0, 12),
+        Position = UDim2.new(0, 12, 0, y or 10),
         BackgroundTransparency = 1,
-        LayoutOrder = order,
         Font = Enum.Font.GothamBold,
         TextSize = 10,
         TextColor3 = C.dim,
@@ -618,7 +674,6 @@ local function createSlider(parent, cfg)
     return {
         set = function(v) setValue(v, false) end,
         get = function() return value end,
-        row = row,
     }
 end
 
@@ -682,7 +737,6 @@ local function createToggle(parent, cfg)
     return {
         get = function() return on end,
         set = function(v) on = v and true or false; render(false) end,
-        row = row,
     }
 end
 
@@ -717,18 +771,18 @@ local function actionButton(parent, cfg)
     return btn
 end
 
-local function readout(parent, y, labelText)
+local function readout(parent, order, labelText)
     local box = new("Frame", {
-        Size = UDim2.new(1, -24, 0, 44),
-        Position = UDim2.new(0, 12, 0, y),
+        Size = UDim2.new(1, 0, 0, 46),
         BackgroundColor3 = C.panel,
         BorderSizePixel = 0,
+        LayoutOrder = order,
     }, parent)
     corner(box, 8)
     stroke(box, C.stroke, 1, 0.4)
 
     new("TextLabel", {
-        Size = UDim2.new(1, -16, 0, 14),
+        Size = UDim2.new(1, -24, 0, 14),
         Position = UDim2.new(0, 12, 0, 6),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamMedium,
@@ -739,8 +793,8 @@ local function readout(parent, y, labelText)
     }, box)
 
     local valueLabel = new("TextLabel", {
-        Size = UDim2.new(1, -16, 0, 18),
-        Position = UDim2.new(0, 12, 0, 20),
+        Size = UDim2.new(1, -150, 0, 18),
+        Position = UDim2.new(0, 12, 0, 22),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamBold,
         TextSize = 15,
@@ -749,18 +803,30 @@ local function readout(parent, y, labelText)
         Text = "—",
     }, box)
 
-    return valueLabel
+    local badge = new("TextLabel", {
+        Size = UDim2.new(0, 126, 0, 16),
+        Position = UDim2.new(1, -138, 0, 23),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        TextSize = 9,
+        TextColor3 = C.warn,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Text = "",
+    }, box)
+
+    return valueLabel, badge
 end
 
 --=====================================================================
 -- PLAYER PAGE
 --=====================================================================
-do
-    local head = card(playerPage, 96, 1)
-    sectionLabel(head, "Player movement", 1).Position = UDim2.new(0, 12, 0, 10)
-    head:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+local speedSlider
 
-    local enableToggle = createToggle(head, {
+do
+    local head = card(playerPage, 118, 1)
+    sectionLabel(head, "Player movement", 10)
+
+    createToggle(head, {
         label = "Enable player tuning",
         y = 28,
         value = state.player.enabled,
@@ -775,55 +841,39 @@ do
         end,
     })
 
-    local speedSlider
     speedSlider = createSlider(head, {
         label = "Walk speed",
         min = 16, max = 300, step = 1,
         value = state.player.speed,
-        y = 58,
+        y = 60,
         format = function(v) return v .. " st/s" end,
         onChanged = function(v)
             state.player.speed = v
             saveConfig()
         end,
     })
-    head.Size = UDim2.new(1, 0, 0, 118)
 
-    local live = readout(playerPage, 0, "Effective walk speed")
+    local live, badge = readout(playerPage, 2, "Effective walk speed")
     live.Text = "16.0 st/s"
-    live.TextColor3 = C.text
-    live.Parent.LayoutOrder = 2
 
-    local badge = new("TextLabel", {
-        Size = UDim2.new(0, 0, 0, 16),
-        Position = UDim2.new(1, -70, 0, 6),
-        BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold,
-        TextSize = 9,
-        TextColor3 = C.warn,
-        TextXAlignment = Enum.TextXAlignment.Right,
-        Text = "",
-    }, live.Parent)
-
-    local jumpCard = card(playerPage, 84, 3)
-    sectionLabel(jumpCard, "Jump", 1).Position = UDim2.new(0, 12, 0, 10)
-    jumpCard:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    local jumpCard = card(playerPage, 88, 3)
+    sectionLabel(jumpCard, "Jump", 10)
 
     createToggle(jumpCard, {
         label = "Override jump power",
-        y = 26,
+        y = 28,
         value = state.player.jumpEnabled,
         onChanged = function(v) state.player.jumpEnabled = v; saveConfig() end,
     })
-    createSlider(jumpCard, {
+    local jumpSlider = createSlider(jumpCard, {
         label = "Jump power",
         min = 30, max = 220, step = 1,
         value = state.player.jump,
-        y = 54,
+        y = 56,
         onChanged = function(v) state.player.jump = v; saveConfig() end,
     })
 
-    local resetCard = card(playerPage, 76, 4)
+    local resetCard = card(playerPage, 80, 4)
     actionButton(resetCard, {
         label = "Reset to defaults (speed 16, jump 50)",
         y = 10,
@@ -831,6 +881,7 @@ do
             state.player.speed = 16
             state.player.jump = 50
             speedSlider.set(16)
+            jumpSlider.set(50)
             saveConfig()
             local hum = getHumanoid()
             if hum then
@@ -844,8 +895,8 @@ do
         end,
     })
     new("TextLabel", {
-        Size = UDim2.new(1, -24, 0, 26),
-        Position = UDim2.new(0, 12, 0, 46),
+        Size = UDim2.new(1, -24, 0, 28),
+        Position = UDim2.new(0, 12, 0, 48),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamMedium,
         TextSize = 9,
@@ -855,7 +906,6 @@ do
         Text = "Server stays authoritative. Values above ~250 may rubber-band on stairs and ladders.",
     }, resetCard)
 
-    -- live display driver
     _G.__VeniceSpeedSuite.updatePlayerReadout = function(current, limit)
         live.Text = string.format("%.1f st/s", current)
         live.TextColor3 = limit and C.warn or C.text
@@ -866,12 +916,13 @@ end
 --=====================================================================
 -- VEHICLE PAGE
 --=====================================================================
-do
-    local detect = card(vehiclePage, 66, 1)
-    sectionLabel(detect, "Vehicle detection", 1).Position = UDim2.new(0, 12, 0, 10)
-    detect:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+local detectLabel, vehSpeed
 
-    local detectLabel = new("TextLabel", {
+do
+    local detect = card(vehiclePage, 72, 1)
+    sectionLabel(detect, "Vehicle detection", 10)
+
+    detectLabel = new("TextLabel", {
         Size = UDim2.new(1, -24, 0, 18),
         Position = UDim2.new(0, 12, 0, 28),
         BackgroundTransparency = 1,
@@ -882,9 +933,9 @@ do
         Text = "Not seated",
     }, detect)
 
-    local vehSpeed = new("TextLabel", {
+    vehSpeed = new("TextLabel", {
         Size = UDim2.new(1, -24, 0, 14),
-        Position = UDim2.new(0, 12, 0, 46),
+        Position = UDim2.new(0, 12, 0, 50),
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamMedium,
         TextSize = 10,
@@ -893,9 +944,8 @@ do
         Text = "0.0 st/s · 0 km/h (est.)",
     }, detect)
 
-    local main = card(vehiclePage, 150, 2)
-    sectionLabel(main, "Vehicle tuning", 1).Position = UDim2.new(0, 12, 0, 10)
-    main:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    local main = card(vehiclePage, 152, 2)
+    sectionLabel(main, "Vehicle tuning", 10)
 
     createToggle(main, {
         label = "Enable vehicle tuning",
@@ -908,41 +958,39 @@ do
         end,
     })
 
-    createSlider(main, {
+    local maxSlider = createSlider(main, {
         label = "Max speed",
         min = 30, max = 600, step = 5,
         value = state.vehicle.maxSpeed,
-        y = 54,
+        y = 56,
         format = function(v) return v .. " st/s" end,
         onChanged = function(v) state.vehicle.maxSpeed = v; saveConfig() end,
     })
 
-    createSlider(main, {
+    local accelSlider = createSlider(main, {
         label = "Acceleration",
         min = 20, max = 600, step = 5,
         value = state.vehicle.accel,
-        y = 96,
+        y = 98,
         format = function(v) return v .. " st/s²" end,
         onChanged = function(v) state.vehicle.accel = v; saveConfig() end,
     })
-    main.Size = UDim2.new(1, 0, 0, 138)
 
-    local brakeCard = card(vehiclePage, 118, 3)
-    sectionLabel(brakeCard, "Braking", 1).Position = UDim2.new(0, 12, 0, 10)
-    brakeCard:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    local brakeCard = card(vehiclePage, 104, 3)
+    sectionLabel(brakeCard, "Braking", 10)
 
-    createSlider(brakeCard, {
+    local brakeSlider = createSlider(brakeCard, {
         label = "Brake force",
         min = 40, max = 900, step = 10,
         value = state.vehicle.brake,
-        y = 26,
+        y = 28,
         format = function(v) return v .. " st/s²" end,
         onChanged = function(v) state.vehicle.brake = v; saveConfig() end,
     })
 
     createToggle(brakeCard, {
         label = "Physics assist (recommended)",
-        y = 68,
+        y = 70,
         value = state.vehicle.assist,
         onChanged = function(v)
             state.vehicle.assist = v
@@ -950,7 +998,6 @@ do
             notify(v and "Assist on — car speed is script-driven" or "Assist off — property writes only", nil)
         end,
     })
-    brakeCard.Size = UDim2.new(1, 0, 0, 100)
 
     local resetVeh = card(vehiclePage, 56, 4)
     actionButton(resetVeh, {
@@ -960,6 +1007,9 @@ do
             state.vehicle.maxSpeed = DEFAULTS.vehicle.maxSpeed
             state.vehicle.accel = DEFAULTS.vehicle.accel
             state.vehicle.brake = DEFAULTS.vehicle.brake
+            maxSlider.set(DEFAULTS.vehicle.maxSpeed)
+            accelSlider.set(DEFAULTS.vehicle.accel)
+            brakeSlider.set(DEFAULTS.vehicle.brake)
             saveConfig()
             notify("Vehicle settings reset", "good")
         end,
@@ -980,9 +1030,8 @@ end
 -- SETTINGS PAGE
 --=====================================================================
 do
-    local limits = card(settingsPage, 128, 1)
-    sectionLabel(limits, "Speed limits", 1).Position = UDim2.new(0, 12, 0, 10)
-    limits:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    local limits = card(settingsPage, 110, 1)
+    sectionLabel(limits, "Speed limits", 10)
 
     createToggle(limits, {
         label = "Enforce speed limits",
@@ -1003,45 +1052,49 @@ do
         format = function(v) return v .. " st/s" end,
         onChanged = function(v) state.limits.global = v; saveConfig() end,
     })
-    limits.Size = UDim2.new(1, 0, 0, 108)
 
-    local zoneCard = card(settingsPage, 120, 2)
-    sectionLabel(zoneCard, "Zones", 1).Position = UDim2.new(0, 12, 0, 10)
-    zoneCard:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    local zoneCard = card(settingsPage, 172, 2)
+    sectionLabel(zoneCard, "Zones", 10)
 
-    local radiusBox = new("TextBox", {
-        Size = UDim2.new(0, 62, 0, 26),
-        Position = UDim2.new(1, -74, 0, 26),
-        BackgroundColor3 = C.panel,
+    local addBtn = new("TextButton", {
+        Size = UDim2.new(1, -162, 0, 26),
+        Position = UDim2.new(0, 12, 0, 26),
+        BackgroundColor3 = C.cardAlt,
         BorderSizePixel = 0,
+        AutoButtonColor = false,
         Font = Enum.Font.GothamMedium,
         TextSize = 11,
         TextColor3 = C.text,
-        PlaceholderText = "radius",
-        Text = "45",
-        ClearTextOnFocus = false,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "  Add zone here",
     }, zoneCard)
-    corner(radiusBox, 6)
-    stroke(radiusBox, C.stroke, 1, 0.3)
+    corner(addBtn, 7)
 
-    local limitBox = new("TextBox", {
-        Size = UDim2.new(0, 62, 0, 26),
-        Position = UDim2.new(1, -142, 0, 26),
-        BackgroundColor3 = C.panel,
-        BorderSizePixel = 0,
-        Font = Enum.Font.GothamMedium,
-        TextSize = 11,
-        TextColor3 = C.text,
-        PlaceholderText = "limit",
-        Text = "60",
-        ClearTextOnFocus = false,
-    }, zoneCard)
-    corner(limitBox, 6)
-    stroke(limitBox, C.stroke, 1, 0.3)
+    local function field(xOffset, placeholder, defaultText)
+        local box = new("TextBox", {
+            Size = UDim2.new(0, 62, 0, 26),
+            Position = UDim2.new(1, xOffset, 0, 26),
+            BackgroundColor3 = C.panel,
+            BorderSizePixel = 0,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            TextColor3 = C.text,
+            PlaceholderText = placeholder,
+            Text = defaultText,
+            ClearTextOnFocus = false,
+            ZIndex = 2,
+        }, zoneCard)
+        corner(box, 6)
+        stroke(box, C.stroke, 1, 0.3)
+        return box
+    end
+
+    local limitBox  = field(-142, "limit", "60")
+    local radiusBox = field(-74, "radius", "45")
 
     local zoneList = new("ScrollingFrame", {
-        Size = UDim2.new(1, -24, 0, 62),
-        Position = UDim2.new(0, 12, 0, 88),
+        Size = UDim2.new(1, -24, 0, 104),
+        Position = UDim2.new(0, 12, 0, 60),
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
         ScrollBarThickness = 3,
@@ -1054,12 +1107,13 @@ do
         Padding = UDim.new(0, 4),
     }, zoneList)
 
-    local zoneCardHeight = 120
-
     local function renderZones()
         for _, child in ipairs(zoneList:GetChildren()) do
-            if child:IsA("Frame") then child:Destroy() end
+            if child:IsA("Frame") or child:IsA("TextLabel") then
+                child:Destroy()
+            end
         end
+
         if #state.limits.zones == 0 then
             new("TextLabel", {
                 Size = UDim2.new(1, 0, 0, 24),
@@ -1068,10 +1122,11 @@ do
                 TextSize = 10,
                 TextColor3 = C.dim,
                 TextXAlignment = Enum.TextXAlignment.Left,
-                Text = "No zones. Stand somewhere and add one below.",
+                Text = "No zones. Stand somewhere and add one.",
             }, zoneList)
             return
         end
+
         for index, zone in ipairs(state.limits.zones) do
             local row = new("Frame", {
                 Size = UDim2.new(1, 0, 0, 26),
@@ -1115,26 +1170,11 @@ do
     end
     renderZones()
 
-    local addBtn = new("TextButton", {
-        Size = UDim2.new(1, -24, 0, 28),
-        Position = UDim2.new(0, 12, 0, 26),
-        BackgroundColor3 = C.cardAlt,
-        BorderSizePixel = 0,
-        AutoButtonColor = false,
-        Font = Enum.Font.GothamMedium,
-        TextSize = 11,
-        TextColor3 = C.text,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "  Add zone at my position",
-    }, zoneCard)
-    corner(addBtn, 7)
     track(addBtn.MouseButton1Click:Connect(function()
         local root = getRoot()
         if not root then return notify("No character", "bad") end
-        local radius = tonumber(radiusBox.Text) or 45
-        local limit = tonumber(limitBox.Text) or 60
-        radius = math.clamp(radius, 5, 500)
-        limit = math.clamp(limit, 5, 300)
+        local radius = math.clamp(tonumber(radiusBox.Text) or 45, 5, 500)
+        local limit  = math.clamp(tonumber(limitBox.Text) or 60, 5, 300)
         local p = root.Position
         table.insert(state.limits.zones, {
             name = string.format("Zone %d", #state.limits.zones + 1),
@@ -1148,8 +1188,7 @@ do
     end))
 
     local persist = card(settingsPage, 104, 3)
-    sectionLabel(persist, "Config & interface", 1).Position = UDim2.new(0, 12, 0, 10)
-    persist:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    sectionLabel(persist, "Config & interface", 10)
 
     actionButton(persist, {
         label = "Save config now",
@@ -1166,26 +1205,12 @@ do
         onClick = function()
             state = deepCopy(DEFAULTS)
             saveConfig()
-            notify("All settings reset — reopen GUI to sync sliders", "good")
+            notify("All settings reset — reopen the GUI to sync sliders", "good")
         end,
     })
 
-    local danger = card(settingsPage, 56, 4)
-    actionButton(danger, {
-        label = "Unload script",
-        y = 10,
-        danger = true,
-        onClick = function()
-            notify("Unloading…", "bad")
-            task.wait(0.35)
-            teardown()
-        end,
-    })
-
-    -- accent swatches
-    local swatchCard = card(settingsPage, 62, 5)
-    sectionLabel(swatchCard, "Accent", 1).Position = UDim2.new(0, 12, 0, 8)
-    swatchCard:FindFirstChildOfClass("TextLabel").Size = UDim2.new(1, -24, 0, 12)
+    local swatchCard = card(settingsPage, 62, 4)
+    sectionLabel(swatchCard, "Accent", 8)
 
     local palette = {
         Color3.fromRGB(94, 141, 255),
@@ -1213,6 +1238,18 @@ do
             notify("Accent updated", "good")
         end))
     end
+
+    local danger = card(settingsPage, 56, 5)
+    actionButton(danger, {
+        label = "Unload script",
+        y = 10,
+        danger = true,
+        onClick = function()
+            notify("Unloading…", "bad")
+            task.wait(0.35)
+            teardown()
+        end,
+    })
 end
 
 --=====================================================================
@@ -1282,7 +1319,7 @@ end
 --=====================================================================
 -- PLAYER ENGINE
 --=====================================================================
-local function applyPlayer(dt)
+local function applyPlayer()
     local hum = getHumanoid()
     if not hum or hum.Health <= 0 then return end
 
@@ -1291,10 +1328,8 @@ local function applyPlayer(dt)
     local target = state.player.speed
     if limit then target = math.min(target, limit) end
 
-    if state.player.enabled then
-        if math.abs(hum.WalkSpeed - target) > 0.05 then
-            pcall(function() hum.WalkSpeed = target end)
-        end
+    if state.player.enabled and math.abs(hum.WalkSpeed - target) > 0.05 then
+        pcall(function() hum.WalkSpeed = target end)
     end
 
     if state.player.jumpEnabled then
@@ -1319,7 +1354,6 @@ local function getVehicle()
     local seat = hum.SeatPart
     local model = seat:FindFirstAncestorOfClass("Model")
     if not model then return nil end
-    -- climb to the outermost model (the whole car)
     while model.Parent and model.Parent ~= workspace do
         local up = model.Parent:FindFirstAncestorOfClass("Model")
         if not up then break end
@@ -1328,28 +1362,48 @@ local function getVehicle()
     return model, seat
 end
 
-local assistState = {
-    mode = "detect",
-    timer = 0,
-    seat = nil,
-}
+local rig = { part = nil, attachment = nil, force = nil }
+
+clearAssistRig = function()
+    if rig.force then pcall(function() rig.force:Destroy() end) end
+    if rig.attachment then pcall(function() rig.attachment:Destroy() end) end
+    rig.force, rig.attachment, rig.part = nil, nil, nil
+end
+
+local function ensureRig(part)
+    if rig.part == part and rig.force and rig.force.Parent then return true end
+    clearAssistRig()
+    local ok = pcall(function()
+        local att = new("Attachment", { Name = "VeniceAssistAtt", Parent = part })
+        local lv = new("LinearVelocity", {
+            Name = "VeniceAssist",
+            Attachment0 = att,
+            VelocityConstraintMode = Enum.VelocityConstraintMode.Line,
+            RelativeTo = Enum.ActuatorRelativeTo.World,
+            MaxForce = 0,
+            Parent = part,
+        })
+        rig.part, rig.attachment, rig.force = part, att, lv
+    end)
+    return ok and rig.force ~= nil
+end
+
+local assist = { mode = "detect", timer = 0, seat = nil }
 
 local function applyVehicle(dt)
     local model, seat = getVehicle()
+    local updater = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.updateVehicleReadout
 
     if not model then
-        assistState.mode = "detect"
-        assistState.timer = 0
-        assistState.seat = nil
-        local updater = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.updateVehicleReadout
+        assist.mode, assist.timer, assist.seat = "detect", 0, nil
+        if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
         if updater then updater(nil, 0) end
         return
     end
 
-    if assistState.seat ~= seat then
-        assistState.seat = seat
-        assistState.mode = "detect"
-        assistState.timer = 0
+    if assist.seat ~= seat then
+        assist.seat, assist.mode, assist.timer = seat, "detect", 0
+        clearAssistRig()
     end
 
     local primary = model.PrimaryPart
@@ -1362,14 +1416,12 @@ local function applyVehicle(dt)
     local velocity = primary and primary.AssemblyLinearVelocity or Vector3.zero
     local speed = velocity.Magnitude
 
-    local updater = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.updateVehicleReadout
-
     if not state.vehicle.enabled then
+        if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
         if updater then updater(model.Name, speed) end
         return
     end
 
-    -- 1. property writes (cheap, often overwritten by the car's script)
     pcall(function()
         for _, d in ipairs(model:GetDescendants()) do
             if d:IsA("VehicleSeat") then
@@ -1384,43 +1436,56 @@ local function applyVehicle(dt)
     end)
 
     if not state.vehicle.assist or not primary then
+        if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
         if updater then updater(model.Name, speed) end
         return
     end
 
-    -- 2. velocity assist
     local throttle = 0
     if seat:IsA("VehicleSeat") then
         local ok, raw = pcall(function() return seat.ThrottleFloat end)
         if ok and type(raw) == "number" then throttle = raw end
     end
 
-    assistState.timer += dt
-    if throttle ~= 0 then
-        assistState.mode = "throttle"
-    elseif assistState.mode == "detect" and assistState.timer > 1.2 and speed < 2 then
-        assistState.mode = "hold"
+    assist.timer += dt
+    if math.abs(throttle) > 0.02 then
+        assist.mode = "throttle"
+    elseif assist.mode == "detect" and assist.timer > 1.2 then
+        assist.mode = "hold"
     end
 
     local forward = primary.CFrame.LookVector
     local forwardSpeed = velocity:Dot(forward)
     local desired
 
-    if assistState.mode == "throttle" then
+    if assist.mode == "throttle" then
         desired = throttle * state.vehicle.maxSpeed
+    elseif forwardSpeed > 0.4 then
+        desired = state.vehicle.maxSpeed
+    elseif forwardSpeed < -0.4 then
+        desired = -state.vehicle.maxSpeed
     else
-        desired = math.clamp(forwardSpeed, -state.vehicle.maxSpeed, state.vehicle.maxSpeed)
+        desired = 0
     end
 
     local increasing = math.abs(desired) > math.abs(forwardSpeed)
     local rate = increasing and state.vehicle.accel or state.vehicle.brake
     local step = math.clamp(desired - forwardSpeed, -rate * dt, rate * dt)
-    local newForward = forwardSpeed + step
 
-    local newVelocity = forward * newForward + Vector3.new(0, velocity.Y, 0)
-    pcall(function() primary.AssemblyLinearVelocity = newVelocity end)
+    local engaged = math.abs(step) > 0.01 or math.abs(throttle) > 0.02
 
-    if updater then updater(model.Name, speed, assistState.mode) end
+    if ensureRig(primary) then
+        rig.force.LineDirection = forward
+        rig.force.LineVelocity = forwardSpeed + step
+        rig.force.MaxForce = engaged
+            and math.max(primary.AssemblyMass * rate * 2, 12000)
+            or 0
+    else
+        local newVelocity = forward * (forwardSpeed + step) + Vector3.new(0, velocity.Y, 0)
+        pcall(function() primary.AssemblyLinearVelocity = newVelocity end)
+    end
+
+    if updater then updater(model.Name, speed, assist.mode) end
 end
 
 --=====================================================================
@@ -1428,7 +1493,7 @@ end
 --=====================================================================
 track(RunService.Heartbeat:Connect(function(dt)
     local ok, err = pcall(function()
-        applyPlayer(dt)
+        applyPlayer()
         applyVehicle(dt)
     end)
     if not ok then
@@ -1436,14 +1501,10 @@ track(RunService.Heartbeat:Connect(function(dt)
     end
 end))
 
---=====================================================================
--- CHARACTER REBIND
---=====================================================================
 track(LP.CharacterAdded:Connect(function()
     task.wait(0.6)
-    assistState.mode = "detect"
-    assistState.timer = 0
-    assistState.seat = nil
+    assist.mode, assist.timer, assist.seat = "detect", 0, nil
+    clearAssistRig()
     notify("Character respawned — tuning re-armed", nil)
 end))
 
@@ -1451,4 +1512,4 @@ end))
 -- BOOT
 --=====================================================================
 tabButtons.Player.MouseButton1Click:Fire()
-notify("Venice Speed Suite loaded · " .. state.ui.keybind.Name .. " toggles GUI", "good")
+notify("Venice Speed Suite v1.1 · " .. state.ui.keybind.Name .. " toggles GUI", "good")
