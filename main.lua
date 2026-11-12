@@ -1,673 +1,1244 @@
--- ============================================================
---  VENICE SPEED SUITE v2.4  –  loggande, lågrisk-start
--- ============================================================
-local VERSION = "2.4"
-local LOG = "VeniceLog.txt"
+--!nocheck
+--[[=====================================================================
+  Venice Speed Suite  v1.6  ·  Bloxburg  ·  lättversion
+  Author: Venice · MIT
+  ---------------------------------------------------------------------
+  Medvetet avskalad: inga UIStroke, ingen UICorner på annat än fönstret,
+  inga hover-tweens, en enda statusrad istället för notis-kort.
+  All funktion är kvar. Byggt i etapper med utskrifter per steg.
+  CLIENT-SIDE ONLY. Kicken är lokal, inte en ban.
+=====================================================================]]
 
-local function log(s)
-    print("[Venice] " .. s)
-    pcall(function()
-        if appendfile then appendfile(LOG, s .. "\n")
-        elseif writefile then writefile(LOG, s .. "\n") end
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+local StarterGui       = game:GetService("StarterGui")
+
+local LP        = Players.LocalPlayer
+local PlayerGui = LP:WaitForChild("PlayerGui", 30)
+if not PlayerGui then return warn("[Venice] ingen PlayerGui") end
+
+local function log(m) print("[Venice] " .. m) end
+
+--=====================================================================
+local CONFIG_FILE = "VeniceSpeedSuite.json"
+local MAX_ZONES   = 40
+
+local DEFAULTS = {
+    player  = { enabled = false, speed = 34, jumpEnabled = false, jump = 50 },
+    vehicle = { enabled = false, maxSpeed = 130, accel = 110, brake = 190, assist = true },
+    limits  = { enabled = false, global = 110, zones = {} },
+    ui      = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
+}
+
+local function deepCopy(t)
+    local o = {}
+    for k, v in pairs(t) do o[k] = type(v) == "table" and deepCopy(v) or v end
+    return o
+end
+
+local state = deepCopy(DEFAULTS)
+local hasFS = pcall(function() return writefile ~= nil end)
+
+local function num(v, f, mn, mx)
+    if type(v) ~= "number" or v ~= v then return f end
+    return math.clamp(v, mn, mx)
+end
+
+local function loadConfig()
+    if not hasFS then return end
+    local ok, raw = pcall(readfile, CONFIG_FILE)
+    if not ok or type(raw) ~= "string" or #raw < 2 then return end
+    local ok2, d = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(d) ~= "table" then return end
+
+    local p = d.player
+    if type(p) == "table" then
+        if type(p.enabled) == "boolean" then state.player.enabled = p.enabled end
+        state.player.speed = num(p.speed, 34, 16, 300)
+        if type(p.jumpEnabled) == "boolean" then state.player.jumpEnabled = p.jumpEnabled end
+        state.player.jump = num(p.jump, 50, 30, 220)
+    end
+    local v = d.vehicle
+    if type(v) == "table" then
+        if type(v.enabled) == "boolean" then state.vehicle.enabled = v.enabled end
+        state.vehicle.maxSpeed = num(v.maxSpeed, 130, 30, 600)
+        state.vehicle.accel = num(v.accel, 110, 20, 600)
+        state.vehicle.brake = num(v.brake, 190, 40, 900)
+        if type(v.assist) == "boolean" then state.vehicle.assist = v.assist end
+    end
+    local l = d.limits
+    if type(l) == "table" then
+        if type(l.enabled) == "boolean" then state.limits.enabled = l.enabled end
+        state.limits.global = num(l.global, 110, 16, 300)
+        if type(l.zones) == "table" then
+            local c = {}
+            for _, z in ipairs(l.zones) do
+                if #c >= MAX_ZONES then break end
+                if type(z) == "table" and type(z.min) == "table"
+                    and type(z.max) == "table" and type(z.limit) == "number" then
+                    table.insert(c, {
+                        name = type(z.name) == "string" and z.name or "Zone",
+                        min = { X = z.min.X or 0, Y = z.min.Y or 0, Z = z.min.Z or 0 },
+                        max = { X = z.max.X or 0, Y = z.max.Y or 0, Z = z.max.Z or 0 },
+                        limit = math.clamp(z.limit, 5, 300),
+                    })
+                end
+            end
+            state.limits.zones = c
+        end
+    end
+    local u = d.ui
+    if type(u) == "table" then
+        if type(u.accent) == "table" then
+            local okc, col = pcall(Color3.fromRGB, u.accent[1] or 94, u.accent[2] or 141, u.accent[3] or 255)
+            if okc then state.ui.accent = col end
+        end
+        if type(u.keybind) == "string" then
+            local oke, k = pcall(function() return Enum.KeyCode[u.keybind] end)
+            if oke and k then state.ui.keybind = k end
+        end
+    end
+end
+
+local function snapshot()
+    return {
+        player = state.player, vehicle = state.vehicle, limits = state.limits,
+        ui = {
+            accent = {
+                math.floor(state.ui.accent.R * 255 + 0.5),
+                math.floor(state.ui.accent.G * 255 + 0.5),
+                math.floor(state.ui.accent.B * 255 + 0.5),
+            },
+            keybind = state.ui.keybind.Name,
+        },
+    }
+end
+
+local saveToken = 0
+local function saveConfig()
+    if not hasFS then return end
+    saveToken += 1
+    local mine = saveToken
+    task.delay(0.6, function()
+        if mine ~= saveToken then return end
+        local ok, enc = pcall(function() return HttpService:JSONEncode(snapshot()) end)
+        if ok then pcall(writefile, CONFIG_FILE, enc) end
     end)
 end
-pcall(function() if writefile then writefile(LOG, "") end end)
-log("0 start v" .. VERSION)
 
-local tWait, tSpawn, tDelay = wait, spawn, delay
-pcall(function() tWait = task.wait; tSpawn = task.spawn; tDelay = task.delay end)
+loadConfig()
 
--- Vänta tills spelet är laddat (viktigt vid injection)
-pcall(function() if not game:IsLoaded() then game.Loaded:Wait() end end)
-local Players = game:GetService("Players")
-local player = Players.LocalPlayer
-while not player do tWait(0.2); player = Players.LocalPlayer end
-tWait(2)
-log("1 spel laddat")
+--=====================================================================
+local connections = {}
+local function track(c) table.insert(connections, c); return c end
 
-local HttpService = game:GetService("HttpService")
-local UIS = game:GetService("UserInputService")
+local generation = 0
+local clearAssistRig
+local rebuild
 
--- Executor-funktioner
-local function getFn(name)
-    local f
-    pcall(function() f = getgenv()[name] end)
-    if not f then pcall(function() f = _G[name] end) end
-    return f
-end
-local firePrompt = getFn("fireproximityprompt")
-local fireClick  = getFn("fireclickdetector")
-log("2 exec: fp=" .. tostring(firePrompt ~= nil) .. " fc=" .. tostring(fireClick ~= nil))
-
-local function notify(msg, dur)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification",
-            {Title = "Venice", Text = msg, Duration = dur or 3})
-    end)
+local function teardown()
+    generation += 1
+    for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    table.clear(connections)
+    if clearAssistRig then pcall(clearAssistRig) end
+    local r = _G.__VeniceSpeedSuite
+    if r and r.gui then pcall(function() r.gui:Destroy() end) end
+    _G.__VeniceSpeedSuite = nil
 end
 
--- ============================================================
---  GUI-förälder: gethui -> CoreGui -> PlayerGui
--- ============================================================
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "VeniceSpeedSuite"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local function new(class, props, parent)
+    local i = Instance.new(class)
+    for k, v in pairs(props) do
+        if k ~= "Parent" then i[k] = v end
+    end
+    i.Parent = parent or props.Parent
+    return i
+end
 
-local parented = false
-local where = ""
-pcall(function()
-    if gethui then ScreenGui.Parent = gethui(); parented = ScreenGui.Parent ~= nil; where = "gethui" end
-end)
-if not parented then pcall(function()
-    ScreenGui.Parent = game:GetService("CoreGui"); parented = ScreenGui.Parent ~= nil; where = "CoreGui"
-end) end
-if not parented then pcall(function()
-    ScreenGui.Parent = player:WaitForChild("PlayerGui", 10); parented = ScreenGui.Parent ~= nil; where = "PlayerGui"
-end) end
-if not parented then log("FEL: ingen GUI-förälder"); return end
-log("3 GUI-förälder: " .. where)
+local function getHumanoid()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid") or nil
+end
 
--- ============================================================
---  Stil
--- ============================================================
+local function getRoot()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart") or nil
+end
+
+local function viewport()
+    local cam = workspace.CurrentCamera
+    return cam and cam.ViewportSize or Vector2.new(1280, 720)
+end
+
 local C = {
-    bg=Color3.fromRGB(12,14,19), panel=Color3.fromRGB(20,24,31), card=Color3.fromRGB(28,33,42),
-    track=Color3.fromRGB(44,50,62), text=Color3.fromRGB(233,237,245), dim=Color3.fromRGB(132,142,160),
-    good=Color3.fromRGB(88,214,141), warn=Color3.fromRGB(255,186,84), bad=Color3.fromRGB(255,106,106),
-    accent=Color3.fromRGB(94,141,255),
+    bg     = Color3.fromRGB(12, 14, 19),
+    panel  = Color3.fromRGB(20, 24, 31),
+    card   = Color3.fromRGB(28, 33, 42),
+    track  = Color3.fromRGB(44, 50, 62),
+    text   = Color3.fromRGB(233, 237, 245),
+    dim    = Color3.fromRGB(132, 142, 160),
+    good   = Color3.fromRGB(88, 214, 141),
+    warn   = Color3.fromRGB(255, 186, 84),
+    bad    = Color3.fromRGB(255, 106, 106),
 }
-local FONT, FONTB = Enum.Font.GothamMedium, Enum.Font.GothamBold
 
-local function corner(p, r)
-    local c = Instance.new("UICorner"); c.CornerRadius = r or UDim.new(0, 8); c.Parent = p
+local function buildFallback(err)
+    pcall(function()
+        local g = new("ScreenGui", { ResetOnSpawn = false }, PlayerGui)
+        local f = new("Frame", {
+            Size = UDim2.new(0, 320, 0, 80), Position = UDim2.new(0.5, -160, 0.5, -40),
+            BackgroundColor3 = C.panel, BorderSizePixel = 0,
+        }, g)
+        new("TextLabel", {
+            Size = UDim2.new(1, -20, 1, -20), Position = UDim2.new(0, 10, 0, 10),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 11,
+            TextWrapped = true, TextColor3 = C.bad, Text = "GUI fel: " .. tostring(err),
+        }, f)
+        log("fallback")
+    end)
 end
 
--- ============================================================
---  Config
--- ============================================================
-local CFG = "VeniceSpeedSuite.json"
-local cfg = {
-    player  = {enabled=false, speed=34, jumpEnabled=false, jump=50},
-    vehicle = {enabled=false, maxSpeed=130},
-    job = {enabled=false, interval=0.15, radius=15, maxPerTick=6, useBlacklist=true, mode="aggressive",
-        blacklist="door,gate,exit,entrance,sleep,bed,sit,chair,seat,menu,shop,buy,sell,radio,tv,toilet,sink,shower,bath,trash,bin",
-        keywords="dough,sauce,cheese,pepperoni,topping,oven,bake,cook,cut,slice,box,order,deliver,pizza,knead,prepare,serve,grab,take,put"},
-    limits = {enabled=false, global=110, zones={}},
-    ui = {keybind="K"},
-}
-pcall(function()
-    if isfile and readfile and isfile(CFG) then
-        local d = HttpService:JSONDecode(readfile(CFG))
-        local function merge(src, dst)
-            for k, v in pairs(src) do
-                if type(v) == "table" and type(dst[k]) == "table" then merge(v, dst[k]) else dst[k] = v end
+--=====================================================================
+local WIN_W, WIN_H = 420, 500
+local CANVAS = 760
+
+local function buildGUI()
+    local myGen = generation
+    log("1 shell")
+
+    local gui = new("ScreenGui", {
+        Name = "VeniceSpeedSuite", ResetOnSpawn = false,
+        IgnoreGuiInset = true, DisplayOrder = 5000,
+    }, PlayerGui)
+    _G.__VeniceSpeedSuite = { gui = gui, teardown = teardown }
+
+    local win = new("Frame", {
+        Size = UDim2.new(0, WIN_W, 0, WIN_H),
+        Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -WIN_H / 2),
+        BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true,
+    }, gui)
+    new("UICorner", { CornerRadius = UDim.new(0, 12) }, win)
+
+    log("2 header")
+    local header = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    }, win)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -100, 0, 18), Position = UDim2.new(0, 14, 0, 8),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15,
+        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Venice Speed Suite",
+    }, header)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 26),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "v1.6 · lätt",
+    }, header)
+
+    local status = new("TextLabel", {
+        Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 37),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+        TextColor3 = C.good, TextXAlignment = Enum.TextXAlignment.Left, Text = "",
+    }, header)
+
+    local function notify(text, kind)
+        if not status.Parent then return end
+        status.Text = tostring(text)
+        status.TextColor3 = kind == "bad" and C.bad or kind == "good" and C.good or C.text
+        task.delay(3, function()
+            if status.Parent and status.Text == tostring(text) then status.Text = "" end
+        end)
+    end
+
+    local function hbtn(g, x, col)
+        local b = new("TextButton", {
+            Size = UDim2.new(0, 26, 0, 24), Position = UDim2.new(1, x, 0, 12),
+            BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false,
+            Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = col, Text = g,
+        }, header)
+        new("UICorner", { CornerRadius = UDim.new(0, 6) }, b)
+        return b
+    end
+
+    local minBtn, closeBtn = hbtn("–", -64, C.dim), hbtn("×", -34, C.bad)
+
+    log("3 drag")
+    local dragging, off = false, nil
+    track(header.InputBegan:Connect(function(i)
+        if i.UserInputType ~= Enum.UserInputType.MouseButton1
+            and i.UserInputType ~= Enum.UserInputType.Touch then return end
+        dragging = true
+        off = Vector2.new(i.Position.X, i.Position.Y) - win.AbsolutePosition
+    end))
+    track(UserInputService.InputChanged:Connect(function(i)
+        if not dragging then return end
+        if i.UserInputType ~= Enum.UserInputType.MouseMovement
+            and i.UserInputType ~= Enum.UserInputType.Touch then return end
+        local vp = viewport()
+        win.Position = UDim2.new(0,
+            math.clamp(i.Position.X - off.X, -WIN_W + 80, vp.X - 80),
+            0, math.clamp(i.Position.Y - off.Y, 0, vp.Y - 40))
+    end))
+    track(UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end))
+
+    log("4 tabs")
+    local bar = new("Frame", {
+        Size = UDim2.new(1, -20, 0, 30), Position = UDim2.new(0, 10, 0, 54),
+        BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    }, win)
+    new("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
+    }, bar)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingTop = UDim.new(0, 4) }, bar)
+
+    local content = new("Frame", {
+        Size = UDim2.new(1, -20, 1, -150), Position = UDim2.new(0, 10, 0, 92),
+        BackgroundTransparency = 1,
+    }, win)
+
+    local pages, tabs = {}, {}
+
+    local function tab(name, order)
+        local b = new("TextButton", {
+            Size = UDim2.new(0, #name * 6 + 24, 1, -8), BackgroundColor3 = C.panel,
+            BorderSizePixel = 0, AutoButtonColor = false, LayoutOrder = order,
+            Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.dim, Text = name,
+        }, bar)
+        new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, b)
+
+        local p = new("ScrollingFrame", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            BorderSizePixel = 0, ScrollBarThickness = 3,
+            ScrollBarImageColor3 = C.track, CanvasSize = UDim2.new(0, 0, 0, CANVAS),
+            Visible = false,
+        }, content)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
+        }, p)
+        new("UIPadding", { PaddingBottom = UDim.new(0, 12) }, p)
+
+        pages[name], tabs[name] = p, b
+        track(b.MouseButton1Click:Connect(function()
+            for o, pg in pairs(pages) do
+                pg.Visible = (o == name)
+                pcall(function()
+                    tabs[o].BackgroundColor3 = o == name and C.card or C.panel
+                    tabs[o].TextColor3 = o == name and C.text or C.dim
+                end)
+            end
+        end))
+        return p
+    end
+
+    local playerPage  = tab("Player", 1)
+    local vehiclePage = tab("Vehicle", 2)
+    local playersPage = tab("Players", 3)
+    local settPage    = tab("Settings", 4)
+
+    -- widgets -------------------------------------------------------
+    local function card(parent, h, order)
+        local f = new("Frame", {
+            Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.card,
+            BorderSizePixel = 0, LayoutOrder = order,
+        }, parent)
+        new("UICorner", { CornerRadius = UDim.new(0, 8) }, f)
+        return f
+    end
+
+    local function label(parent, text, y, size, col)
+        return new("TextLabel", {
+            Size = UDim2.new(1, -20, 0, 14), Position = UDim2.new(0, 10, 0, y),
+            BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+            TextSize = size or 9, TextColor3 = col or C.dim,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = text,
+        }, parent)
+    end
+
+    local function slider(parent, cfg)
+        local row = new("Frame", {
+            Size = UDim2.new(1, -20, 0, 40), Position = UDim2.new(0, 10, 0, cfg.y),
+            BackgroundTransparency = 1,
+        }, parent)
+
+        new("TextLabel", {
+            Size = UDim2.new(1, -70, 0, 14), BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = cfg.label,
+        }, row)
+
+        local val = new("TextLabel", {
+            Size = UDim2.new(0, 70, 0, 14), Position = UDim2.new(1, -70, 0, 0),
+            BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11,
+            TextColor3 = state.ui.accent, TextXAlignment = Enum.TextXAlignment.Right, Text = "",
+        }, row)
+
+        local trk = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 5), Position = UDim2.new(0, 0, 0, 24),
+            BackgroundColor3 = C.track, BorderSizePixel = 0,
+        }, row)
+
+        local fill = new("Frame", {
+            Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = state.ui.accent,
+            BorderSizePixel = 0,
+        }, trk)
+
+        local knob = new("Frame", {
+            Size = UDim2.new(0, 12, 0, 12), AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = Color3.new(1, 1, 1),
+            BorderSizePixel = 0, ZIndex = 2,
+        }, trk)
+
+        local hit = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 20), Position = UDim2.new(0, 0, 0.5, -10),
+            BackgroundTransparency = 1, ZIndex = 3,
+        }, trk)
+
+        local v = math.clamp(cfg.value, cfg.min, cfg.max)
+
+        local function render()
+            local a = (v - cfg.min) / math.max(cfg.max - cfg.min, 1e-6)
+            fill.Size = UDim2.new(a, 0, 1, 0)
+            knob.Position = UDim2.new(a, 0, 0.5, 0)
+            val.Text = cfg.format and cfg.format(v) or tostring(v)
+        end
+
+        local function set(nv, fire)
+            nv = math.clamp(math.floor(nv / cfg.step + 0.5) * cfg.step, cfg.min, cfg.max)
+            if nv == v then return end
+            v = nv
+            render()
+            if fire and cfg.onChanged then cfg.onChanged(v) end
+        end
+
+        local hold = false
+        local function fromX(x)
+            local w = trk.AbsoluteSize.X
+            if w <= 0 then return end
+            set(cfg.min + math.clamp((x - trk.AbsolutePosition.X) / w, 0, 1)
+                * (cfg.max - cfg.min), true)
+        end
+
+        track(hit.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1
+                or i.UserInputType == Enum.UserInputType.Touch then
+                hold = true
+                fromX(i.Position.X)
+            end
+        end))
+        track(UserInputService.InputChanged:Connect(function(i)
+            if not hold then return end
+            if i.UserInputType == Enum.UserInputType.MouseMovement
+                or i.UserInputType == Enum.UserInputType.Touch then fromX(i.Position.X) end
+        end))
+        track(UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1
+                or i.UserInputType == Enum.UserInputType.Touch then hold = false end
+        end))
+
+        render()
+        return { set = function(n) set(n, false) end }
+    end
+
+    local function toggle(parent, cfg)
+        local row = new("Frame", {
+            Size = UDim2.new(1, -20, 0, 26), Position = UDim2.new(0, 10, 0, cfg.y),
+            BackgroundTransparency = 1,
+        }, parent)
+
+        new("TextLabel", {
+            Size = UDim2.new(1, -60, 1, 0), BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = cfg.label,
+        }, row)
+
+        local pill = new("TextButton", {
+            Size = UDim2.new(0, 36, 0, 18), Position = UDim2.new(1, -36, 0.5, -9),
+            BackgroundColor3 = C.track, BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+        }, row)
+
+        local dot = new("Frame", {
+            Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(0, 3, 0.5, -6),
+            BackgroundColor3 = C.dim, BorderSizePixel = 0,
+        }, pill)
+
+        local on = cfg.value and true or false
+        local function render()
+            pill.BackgroundColor3 = on and state.ui.accent or C.track
+            dot.Position = on and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
+            dot.BackgroundColor3 = on and Color3.new(1, 1, 1) or C.dim
+        end
+        render()
+
+        track(pill.MouseButton1Click:Connect(function()
+            on = not on
+            render()
+            if cfg.onChanged then cfg.onChanged(on) end
+        end))
+    end
+
+    local function button(parent, cfg)
+        local b = new("TextButton", {
+            Size = UDim2.new(1, -20, 0, 28), Position = UDim2.new(0, 10, 0, cfg.y),
+            BackgroundColor3 = cfg.danger and Color3.fromRGB(50, 27, 32) or C.track,
+            BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.Gotham,
+            TextSize = 11, TextColor3 = cfg.danger and C.bad or C.text, Text = cfg.label,
+        }, parent)
+        track(b.MouseButton1Click:Connect(function()
+            if cfg.onClick then
+                local ok, e = pcall(cfg.onClick)
+                if not ok then notify(e, "bad") end
+            end
+        end))
+        return b
+    end
+
+    -- engine state --------------------------------------------------
+    local jumpForced = false
+    local rig = { part = nil, att = nil, force = nil }
+    local assist = {
+        mode = "detect", timer = 0, lastSeat = nil, seats = {},
+        applied = nil, writeTimer = 0, direct = false, probe = 0,
+        probeFrom = 0, primary = nil, anchored = false, lastNote = 0,
+    }
+    local selected = {}
+
+    clearAssistRig = function()
+        if rig.force then pcall(function() rig.force:Destroy() end) end
+        if rig.att then pcall(function() rig.att:Destroy() end) end
+        rig.force, rig.att, rig.part = nil, nil, nil
+    end
+
+    local function zoneLimitAt(pos)
+        if not state.limits.enabled then return nil end
+        for _, z in ipairs(state.limits.zones) do
+            local mn, mx = z.min, z.max
+            if pos.X >= math.min(mn.X, mx.X) and pos.X <= math.max(mn.X, mx.X)
+                and pos.Y >= math.min(mn.Y, mx.Y) and pos.Y <= math.max(mn.Y, mx.Y)
+                and pos.Z >= math.min(mn.Z, mx.Z) and pos.Z <= math.max(mn.Z, mx.Z) then
+                return z.limit
             end
         end
-        merge(d, cfg)
+        return state.limits.global
     end
-end)
-local sTok = 0
-local function saveCfg()
-    sTok = sTok + 1
-    local t = sTok
-    tDelay(0.8, function()
-        if t ~= sTok then return end
-        pcall(function() if writefile then writefile(CFG, HttpService:JSONEncode(cfg)) end end)
-    end)
-end
-log("4 config klar")
 
--- ============================================================
---  Fönster
--- ============================================================
-local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(460, 560)
-main.Position = UDim2.fromOffset(80, 80)
-main.BackgroundColor3 = C.bg
-main.BorderSizePixel = 0
-main.Active = true
-main.Parent = ScreenGui
-corner(main)
+    local function applyPlayer()
+        local hum = getHumanoid()
+        if not hum or hum.Health <= 0 then return end
+        local root = getRoot()
+        local lim = root and zoneLimitAt(root.Position) or nil
+        local target = state.player.speed
+        if lim then target = math.min(target, lim) end
 
-local tbar = Instance.new("Frame")
-tbar.Size = UDim2.new(1, 0, 0, 36)
-tbar.BackgroundColor3 = C.panel
-tbar.BorderSizePixel = 0
-tbar.Parent = main
-corner(tbar)
-
--- Egen drag (Draggable är föråldrat)
-do
-    local dragging, startPos, startMouse = false
-    tbar.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true; startMouse = i.Position; startPos = main.Position
+        if state.player.enabled and math.abs(hum.WalkSpeed - target) > 0.05 then
+            pcall(function() hum.WalkSpeed = target end)
         end
-    end)
-    UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-    end)
-    UIS.InputChanged:Connect(function(i)
-        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
-            local d = i.Position - startMouse
-            main.Position = UDim2.fromOffset(startPos.X.Offset + d.X, startPos.Y.Offset + d.Y)
+        if state.player.jumpEnabled then
+            if not jumpForced then
+                jumpForced = true
+                pcall(function() hum.UseJumpPower = true end)
+            end
+            if math.abs(hum.JumpPower - state.player.jump) > 0.05 then
+                pcall(function() hum.JumpPower = state.player.jump end)
+            end
+        else
+            jumpForced = false
         end
-    end)
-end
+        local u = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.playerReadout
+        if u then u(hum.WalkSpeed, lim) end
+    end
 
-local ttl = Instance.new("TextLabel")
-ttl.Size = UDim2.new(1, -80, 1, 0)
-ttl.Position = UDim2.fromOffset(12, 0)
-ttl.BackgroundTransparency = 1
-ttl.Text = "Venice Speed Suite v" .. VERSION
-ttl.TextColor3 = C.accent
-ttl.TextSize = 14
-ttl.Font = FONTB
-ttl.TextXAlignment = Enum.TextXAlignment.Left
-ttl.Parent = tbar
-
-local function titleBtn(text, col, x, cb)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.fromOffset(28, 28)
-    b.Position = UDim2.new(1, x, 0, 4)
-    b.BackgroundColor3 = col
-    b.Text = text
-    b.TextColor3 = C.text
-    b.TextSize = 13
-    b.Font = FONTB
-    b.BorderSizePixel = 0
-    b.Parent = tbar
-    corner(b)
-    b.MouseButton1Click:Connect(cb)
-end
-
-local alive = true
-titleBtn("X", C.bad, -32, function() alive = false; ScreenGui:Destroy() end)
-local mini = false
-titleBtn("-", C.warn, -64, function()
-    mini = not mini
-    main.Size = mini and UDim2.fromOffset(460, 36) or UDim2.fromOffset(460, 560)
-end)
-log("5 fönster klart")
-
--- ============================================================
---  Tabs
--- ============================================================
-local TABS = {"Player", "Vehicle", "Job", "Players", "Settings"}
-local tF, tB = {}, {}
-
-local tabBar = Instance.new("Frame")
-tabBar.Size = UDim2.new(1, 0, 0, 34)
-tabBar.Position = UDim2.fromOffset(0, 36)
-tabBar.BackgroundColor3 = C.panel
-tabBar.BorderSizePixel = 0
-tabBar.Parent = main
-
-local tCon = Instance.new("Frame")
-tCon.Size = UDim2.new(1, -16, 1, -86)
-tCon.Position = UDim2.fromOffset(8, 78)
-tCon.BackgroundTransparency = 1
-tCon.ClipsDescendants = true
-tCon.Parent = main
-
-for i, name in ipairs(TABS) do
-    local w = 1 / #TABS
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(w, 0, 1, 0)
-    b.Position = UDim2.new(w * (i - 1), 0, 0, 0)
-    b.BackgroundColor3 = C.bg
-    b.Text = name
-    b.TextColor3 = C.dim
-    b.TextSize = 11
-    b.Font = FONT
-    b.BorderSizePixel = 0
-    b.Parent = tabBar
-
-    local fr = Instance.new("ScrollingFrame")
-    fr.Size = UDim2.new(1, 0, 1, 0)
-    fr.BackgroundTransparency = 1
-    fr.BorderSizePixel = 0
-    fr.ScrollBarThickness = 4
-    fr.CanvasSize = UDim2.new(0, 0, 0, 0)
-    fr.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    fr.Visible = false
-    fr.Parent = tCon
-
-    local ul = Instance.new("UIListLayout")
-    ul.SortOrder = Enum.SortOrder.LayoutOrder
-    ul.Padding = UDim.new(0, 6)
-    ul.Parent = fr
-
-    tF[name] = fr
-    tB[name] = b
-    b.MouseButton1Click:Connect(function()
-        for n in pairs(tF) do
-            tF[n].Visible = false
-            tB[n].BackgroundColor3 = C.bg
-            tB[n].TextColor3 = C.dim
+    local function getVehicle()
+        local hum = getHumanoid()
+        if not hum or not hum.SeatPart then return nil end
+        local seat = hum.SeatPart
+        local m = seat:FindFirstAncestorOfClass("Model")
+        if not m then return nil end
+        local d = 0
+        while m.Parent and m.Parent ~= workspace and d < 4 do
+            local up = m.Parent:FindFirstAncestorOfClass("Model")
+            if not up then break end
+            m = up
+            d += 1
         end
-        fr.Visible = true
-        b.BackgroundColor3 = C.card
-        b.TextColor3 = C.accent
-    end)
-end
-tB.Player.BackgroundColor3 = C.card
-tB.Player.TextColor3 = C.accent
-tF.Player.Visible = true
-log("6 tabs klara")
-
--- ============================================================
---  Komponenter
--- ============================================================
-local function mkCard(parent, title)
-    local c = Instance.new("Frame")
-    c.Size = UDim2.new(1, -6, 0, 0)
-    c.AutomaticSize = Enum.AutomaticSize.Y
-    c.BackgroundColor3 = C.card
-    c.BorderSizePixel = 0
-    c.Parent = parent
-    corner(c)
-    local pd = Instance.new("UIPadding")
-    pd.PaddingLeft = UDim.new(0, 10); pd.PaddingRight = UDim.new(0, 10)
-    pd.PaddingTop = UDim.new(0, 8);   pd.PaddingBottom = UDim.new(0, 8)
-    pd.Parent = c
-    local l = Instance.new("UIListLayout")
-    l.SortOrder = Enum.SortOrder.LayoutOrder
-    l.Padding = UDim.new(0, 5)
-    l.Parent = c
-    if title then
-        local t = Instance.new("TextLabel")
-        t.Size = UDim2.new(1, 0, 0, 18)
-        t.BackgroundTransparency = 1
-        t.Text = title
-        t.TextColor3 = C.accent
-        t.TextSize = 12
-        t.Font = FONTB
-        t.TextXAlignment = Enum.TextXAlignment.Left
-        t.Parent = c
+        return m, seat
     end
-    return c
-end
 
-local function mkLabel(parent, text, col, h)
-    local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, 0, 0, h or 16)
-    l.BackgroundTransparency = 1
-    l.Text = text
-    l.TextColor3 = col or C.dim
-    l.TextSize = 11
-    l.Font = FONT
-    l.TextXAlignment = Enum.TextXAlignment.Left
-    l.TextWrapped = true
-    l.Parent = parent
-    return l
-end
-
-local function mkToggle(parent, label, def, cb)
-    local r = Instance.new("Frame")
-    r.Size = UDim2.new(1, 0, 0, 28)
-    r.BackgroundTransparency = 1
-    r.Parent = parent
-    mkLabel(r, label, C.text, 28).Size = UDim2.new(1, -50, 1, 0)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.fromOffset(42, 22)
-    b.Position = UDim2.new(1, -44, 0, 3)
-    b.TextColor3 = C.text
-    b.TextSize = 10
-    b.Font = FONTB
-    b.BorderSizePixel = 0
-    b.Parent = r
-    corner(b, UDim.new(0, 6))
-    local st = def
-    local function paint() b.BackgroundColor3 = st and C.good or C.track; b.Text = st and "PÅ" or "AV" end
-    paint()
-    b.MouseButton1Click:Connect(function() st = not st; paint(); pcall(cb, st) end)
-end
-
-local function mkSlider(parent, label, mn, mx, def, cb)
-    local r = Instance.new("Frame")
-    r.Size = UDim2.new(1, 0, 0, 36)
-    r.BackgroundTransparency = 1
-    r.Parent = parent
-    mkLabel(r, label, C.text, 16).Size = UDim2.new(0.6, 0, 0, 16)
-    local vl = mkLabel(r, tostring(def), C.accent, 16)
-    vl.Size = UDim2.new(0.4, 0, 0, 16)
-    vl.Position = UDim2.new(0.6, 0, 0, 0)
-    vl.TextXAlignment = Enum.TextXAlignment.Right
-    local tr = Instance.new("Frame")
-    tr.Size = UDim2.new(1, 0, 0, 8)
-    tr.Position = UDim2.fromOffset(0, 22)
-    tr.BackgroundColor3 = C.track
-    tr.BorderSizePixel = 0
-    tr.Parent = r
-    corner(tr, UDim.new(0, 4))
-    local fl = Instance.new("Frame")
-    fl.Size = UDim2.new(math.clamp((def - mn) / (mx - mn), 0, 1), 0, 1, 0)
-    fl.BackgroundColor3 = C.accent
-    fl.BorderSizePixel = 0
-    fl.Parent = tr
-    corner(fl, UDim.new(0, 4))
-    local drag = false
-    local function setFrom(x)
-        local rv = math.clamp((x - tr.AbsolutePosition.X) / math.max(tr.AbsoluteSize.X, 1), 0, 1)
-        local v = math.floor(mn + rv * (mx - mn) + 0.5)
-        fl.Size = UDim2.new(rv, 0, 1, 0)
-        vl.Text = tostring(v)
-        pcall(cb, v)
+    local function pickPrimary(model, seat)
+        local okR, ar = pcall(function() return seat.AssemblyRootPart end)
+        if okR and ar and ar.Parent and not ar.Anchored
+            and not ar:IsA("Seat") and not ar:IsA("VehicleSeat") then
+            return ar
+        end
+        local best, bs = nil, -1
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") and not d.Anchored
+                and not d:IsA("Seat") and not d:IsA("VehicleSeat") then
+                local n = d.Name:lower()
+                local w = n:find("wheel") or n:find("tire") or n:find("rim")
+                local s = d.AssemblyMass * (w and 0.2 or 1)
+                if s > bs then best, bs = d, s end
+            end
+        end
+        return best or model.PrimaryPart or ar
     end
-    tr.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = true; setFrom(i.Position.X) end
-    end)
-    UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
-    end)
-    UIS.InputChanged:Connect(function(i)
-        if drag and i.UserInputType == Enum.UserInputType.MouseMovement then setFrom(i.Position.X) end
-    end)
-end
 
-local function mkButton(parent, text, col, cb)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, 0, 0, 30)
-    b.BackgroundColor3 = col or C.accent
-    b.Text = text
-    b.TextColor3 = C.text
-    b.TextSize = 12
-    b.Font = FONTB
-    b.BorderSizePixel = 0
-    b.Parent = parent
-    corner(b)
-    b.MouseButton1Click:Connect(function() pcall(cb) end)
-    return b
-end
-log("7 komponenter klara")
-
--- ============================================================
---  Tab-innehåll (inget startar i bakgrunden här)
--- ============================================================
-local playerStatus, vehicleStatus
-
-pcall(function()
-    local c = mkCard(tF.Player, "Rörelse")
-    mkToggle(c, "Walkspeed", cfg.player.enabled, function(v) cfg.player.enabled = v; saveCfg() end)
-    mkSlider(c, "Hastighet", 16, 300, cfg.player.speed, function(v) cfg.player.speed = v; saveCfg() end)
-    mkToggle(c, "Jump", cfg.player.jumpEnabled, function(v) cfg.player.jumpEnabled = v; saveCfg() end)
-    mkSlider(c, "Hopphöjd", 50, 400, cfg.player.jump, function(v) cfg.player.jump = v; saveCfg() end)
-    playerStatus = mkLabel(c, "WS: -- | JP: --", C.dim)
-end)
-
-pcall(function()
-    local c = mkCard(tF.Vehicle, "Fordon")
-    mkToggle(c, "Aktivera", cfg.vehicle.enabled, function(v) cfg.vehicle.enabled = v; saveCfg() end)
-    mkSlider(c, "Maxhastighet", 30, 500, cfg.vehicle.maxSpeed, function(v) cfg.vehicle.maxSpeed = v; saveCfg() end)
-    vehicleStatus = mkLabel(c, "Inget fordon", C.dim)
-end)
-
--- JOB
-local pCache, cCache, cooldowns = {}, {}, {}
-local scanning = false
-local jobStats = {a = 0, p = 0, c = 0, f = 0}
-local jobStatus, jobDebug
-
-local function listMatch(text, csv)
-    local lo = string.lower(text or "")
-    for w in string.gmatch(csv, "[^,]+") do
-        if string.find(lo, w, 1, true) then return true end
+    local function ensureRig(part)
+        if rig.part == part and rig.force and rig.force.Parent then return true end
+        clearAssistRig()
+        local ok = pcall(function()
+            local a = new("Attachment", { Name = "VeniceAtt" }, part)
+            local lv = new("LinearVelocity", {
+                Name = "VeniceAssist", Attachment0 = a,
+                VelocityConstraintMode = Enum.VelocityConstraintMode.Line,
+                RelativeTo = Enum.ActuatorRelativeTo.World, MaxForce = 0,
+            }, part)
+            rig.part, rig.att, rig.force = part, a, lv
+        end)
+        return ok and rig.force ~= nil and rig.force.Parent ~= nil
     end
-    return false
-end
 
-local function posOf(inst)
-    local par = inst.Parent
-    if not par then return nil end
-    if par:IsA("BasePart") then return par.Position end
-    if par:IsA("Attachment") then return par.WorldPosition end
-    local bp = par:FindFirstChildWhichIsA("BasePart")
-    return bp and bp.Position or nil
-end
+    local function cacheSeats(model)
+        table.clear(assist.seats)
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("VehicleSeat") then table.insert(assist.seats, d) end
+        end
+    end
 
-pcall(function()
-    local c = mkCard(tF.Job, "Pizza Auto-Farm")
-    jobStatus = mkLabel(c, "Tryck FORCE SCAN först, slå sedan på", C.dim, 32)
-    jobDebug = mkLabel(c, "A:0 P:0 C:0 F:0", C.dim, 32)
-    mkToggle(c, "Aktivera", cfg.job.enabled, function(v) cfg.job.enabled = v; saveCfg() end)
-    mkSlider(c, "Intervall (x0.1 s)", 1, 10, math.floor(cfg.job.interval * 10), function(v) cfg.job.interval = v / 10; saveCfg() end)
-    mkSlider(c, "Radie (studs)", 5, 50, cfg.job.radius, function(v) cfg.job.radius = v; saveCfg() end)
-    mkSlider(c, "Max per tick", 1, 15, cfg.job.maxPerTick, function(v) cfg.job.maxPerTick = v; saveCfg() end)
-    mkToggle(c, "Svartlista", cfg.job.useBlacklist, function(v) cfg.job.useBlacklist = v; saveCfg() end)
-    local modeL = mkLabel(c, "Läge: " .. cfg.job.mode, C.accent)
-    mkButton(c, "Växla läge (aggressive/keyword)", C.warn, function()
-        cfg.job.mode = cfg.job.mode == "aggressive" and "keyword" or "aggressive"
-        modeL.Text = "Läge: " .. cfg.job.mode
-        saveCfg()
-    end)
+    local function resetAssist()
+        assist.mode, assist.timer = "detect", 0
+        assist.lastSeat, assist.applied = nil, nil
+        assist.writeTimer, assist.direct, assist.probe = 0, false, 0
+        assist.primary, assist.anchored = nil, false
+        table.clear(assist.seats)
+        clearAssistRig()
+    end
 
-    local c2 = mkCard(tF.Job, "Verktyg")
-    mkButton(c2, "FORCE SCAN (kan ta några sek)", C.warn, function()
-        if scanning then return end
-        scanning = true
-        tSpawn(function()
-            log("scan start")
-            local np, nc = {}, {}
+    local function applyVehicle(dt)
+        local model, seat = getVehicle()
+        local u = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.vehicleReadout
+
+        if not model then
+            if assist.lastSeat ~= nil then resetAssist() end
+            if u then u(nil, 0) end
+            return
+        end
+
+        if assist.lastSeat ~= seat then
+            assist.lastSeat = seat
+            assist.mode, assist.timer = "detect", 0
+            assist.applied, assist.writeTimer = nil, 0
+            assist.direct, assist.probe = false, 0
+            clearAssistRig()
+            cacheSeats(model)
+            local okP, p = pcall(pickPrimary, model, seat)
+            assist.primary = okP and p or nil
+            assist.anchored = assist.primary ~= nil and assist.primary.Anchored
+            if assist.anchored and os.clock() - assist.lastNote > 3 then
+                assist.lastNote = os.clock()
+                notify("Bilen är anchrad — fart går ej att ändra", "bad")
+            end
+        end
+
+        local primary = assist.primary
+        if not primary or not primary.Parent then
+            local okP, p = pcall(pickPrimary, model, seat)
+            primary = okP and p or nil
+            assist.primary = primary
+            assist.anchored = primary ~= nil and primary.Anchored
+        end
+
+        local vel = Vector3.zero
+        if primary then
+            local okV, v = pcall(function() return primary.AssemblyLinearVelocity end)
+            if okV and typeof(v) == "Vector3" then vel = v end
+        end
+        local speed = vel.Magnitude
+        local method = assist.anchored and "anchrad" or (assist.direct and "direkt" or "constraint")
+        local info = string.format("metod: %s · %d säten", method, #assist.seats)
+
+        if not state.vehicle.enabled then
+            if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
+            if u then u(model.Name, speed, nil, info) end
+            return
+        end
+
+        assist.writeTimer -= dt
+        if assist.writeTimer <= 0 or assist.applied ~= state.vehicle.maxSpeed then
+            assist.writeTimer = 0.25
+            assist.applied = state.vehicle.maxSpeed
             pcall(function()
-                local desc = workspace:GetDescendants()
-                for i = 1, #desc do
-                    local d = desc[i]
-                    if d:IsA("ProximityPrompt") then np[#np + 1] = d
-                    elseif d:IsA("ClickDetector") then nc[#nc + 1] = d end
-                    if i % 300 == 0 then tWait(0.03) end
+                for _, s in ipairs(assist.seats) do
+                    s.MaxSpeed = state.vehicle.maxSpeed
+                    s.MaxTorque = math.max(60000, state.vehicle.maxSpeed * 1400)
                 end
+                model:SetAttribute("MaxSpeed", state.vehicle.maxSpeed)
             end)
-            pCache, cCache = np, nc
-            scanning = false
-            log("scan klar " .. #np .. "p/" .. #nc .. "c")
-            notify("Scan klar: " .. #np .. " prompts, " .. #nc .. " clicks")
-        end)
-    end)
-    mkButton(c2, "Avfyra närmaste prompt", C.accent, function()
-        local ch = player.Character
-        local root = ch and ch:FindFirstChild("HumanoidRootPart")
-        if not root then return end
-        local best, bd = nil, math.huge
-        for _, p in ipairs(pCache) do
-            local pp = p.Parent and posOf(p)
-            if pp then
-                local d = (pp - root.Position).Magnitude
-                if d < bd then bd = d; best = p end
+        end
+
+        if not state.vehicle.assist or not primary or assist.anchored then
+            if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
+            if u then u(model.Name, speed, nil, info) end
+            return
+        end
+
+        local thr = 0
+        if seat:IsA("VehicleSeat") then
+            local okT, r = pcall(function() return seat.ThrottleFloat end)
+            if okT and type(r) == "number" then thr = r end
+        end
+
+        assist.timer += dt
+        if math.abs(thr) > 0.02 then assist.mode = "throttle"
+        elseif assist.mode == "detect" and assist.timer > 1.2 then assist.mode = "hold" end
+
+        local okF, fwd = pcall(function() return primary.CFrame.LookVector end)
+        if not okF or typeof(fwd) ~= "Vector3" then
+            if u then u(model.Name, speed, nil, info) end
+            return
+        end
+
+        local fs = vel:Dot(fwd)
+        local desired
+        if assist.mode == "throttle" then desired = thr * state.vehicle.maxSpeed
+        elseif fs > 0.05 then desired = state.vehicle.maxSpeed
+        elseif fs < -0.05 then desired = -state.vehicle.maxSpeed
+        else desired = 0 end
+
+        local inc = math.abs(desired) > math.abs(fs)
+        local rate = inc and state.vehicle.accel or state.vehicle.brake
+        local step = math.clamp(desired - fs, -rate * dt, rate * dt)
+        local engaged = math.abs(step) > 0.01
+
+        if engaged and inc and not assist.direct then
+            if assist.probe == 0 then
+                assist.probe, assist.probeFrom = 0.0001, fs
+            else
+                assist.probe += dt
+                if assist.probe > 1 then
+                    if math.abs(fs - assist.probeFrom) < 2 then
+                        assist.direct = true
+                        notify("Assist: ingen effekt — byter metod", "bad")
+                    end
+                    assist.probe = 0
+                end
+            end
+        elseif not inc then
+            assist.probe = 0
+        end
+
+        if not assist.direct and ensureRig(primary) then
+            rig.force.LineDirection = fwd
+            rig.force.LineVelocity = fs + step
+            rig.force.MaxForce = engaged and math.max(primary.AssemblyMass * rate * 2, 12000) or 0
+        else
+            if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
+            if engaged then
+                local nv = fwd * (fs + step) + Vector3.new(0, vel.Y, 0)
+                pcall(function() primary.AssemblyLinearVelocity = nv end)
             end
         end
-        if best and firePrompt then pcall(firePrompt, best); notify("Avfyrade (" .. math.floor(bd) .. " studs)")
-        else notify("Ingen prompt / fireproximityprompt saknas") end
-    end)
-    mkButton(c2, "Nollställ statistik", C.bad, function() jobStats = {a = 0, p = 0, c = 0, f = 0} end)
-end)
 
--- PLAYERS
-pcall(function()
-    local c = mkCard(tF.Players, "Spelare i servern")
-    local list = mkLabel(c, "...", C.text, 16)
-    list.AutomaticSize = Enum.AutomaticSize.Y
-    local function refresh()
-        local l = {}
-        for _, p in ipairs(Players:GetPlayers()) do l[#l + 1] = (p == player and "* " or "  ") .. p.Name end
-        list.Text = table.concat(l, "\n")
+        if u then u(model.Name, speed, assist.mode, info) end
     end
-    refresh()
-    local c2 = mkCard(tF.Players, "Lokal kick (bara du ser det)")
-    local kb = Instance.new("TextBox")
-    kb.Size = UDim2.new(1, 0, 0, 30)
-    kb.BackgroundColor3 = C.panel
-    kb.TextColor3 = C.text
-    kb.TextSize = 12
-    kb.Font = FONT
-    kb.PlaceholderText = "Spelarnamn..."
-    kb.Text = ""
-    kb.BorderSizePixel = 0
-    kb.Parent = c2
-    corner(kb)
-    mkButton(c2, "Uppdatera lista", C.accent, refresh)
-    mkButton(c2, "Dölj spelare lokalt", C.bad, function()
-        local t = Players:FindFirstChild(kb.Text)
-        if t and t.Character then t.Character.Parent = nil; notify("Dold lokalt") else notify("Ej hittad") end
-    end)
-end)
 
--- SETTINGS
-pcall(function()
-    local c = mkCard(tF.Settings, "Hastighetszoner")
-    mkToggle(c, "Aktivera zoner", cfg.limits.enabled, function(v) cfg.limits.enabled = v; saveCfg() end)
-    mkSlider(c, "Global max", 16, 300, cfg.limits.global, function(v) cfg.limits.global = v; saveCfg() end)
-    local zl = mkLabel(c, "Zoner: " .. #cfg.limits.zones, C.dim)
-    mkButton(c, "Lägg till zon här", C.good, function()
-        local ch = player.Character
-        local r = ch and ch:FindFirstChild("HumanoidRootPart")
-        if not r or #cfg.limits.zones >= 40 then return end
-        table.insert(cfg.limits.zones, {x = math.floor(r.Position.X), y = math.floor(r.Position.Y), z = math.floor(r.Position.Z), r = 30, speed = 50})
-        zl.Text = "Zoner: " .. #cfg.limits.zones
-        saveCfg()
-    end)
-    mkButton(c, "Rensa zoner", C.bad, function() cfg.limits.zones = {}; zl.Text = "Zoner: 0"; saveCfg() end)
+    -- stages --------------------------------------------------------
+    local speedSlider
 
-    local c2 = mkCard(tF.Settings, "Config")
-    mkButton(c2, "Återställ config (starta om efter)", C.bad, function()
-        pcall(function() if delfile and isfile and isfile(CFG) then delfile(CFG) end end)
-        notify("Config raderad, kör scriptet igen")
-    end)
+    local function stagePlayer()
+        log("5 player")
+        local c = card(playerPage, 108, 1)
+        label(c, "SPELARE", 8)
 
-    local c3 = mkCard(tF.Settings, "Diagnostik")
-    mkLabel(c3, "GUI-förälder: " .. where, C.accent)
-    mkLabel(c3, "fireproximityprompt: " .. (firePrompt and "ja" or "nej"), firePrompt and C.good or C.bad)
-    mkLabel(c3, "fireclickdetector: " .. (fireClick and "ja" or "nej"), fireClick and C.good or C.bad)
-    mkLabel(c3, "Loggfil: " .. LOG, C.dim)
-end)
-log("8 tab-innehåll klart")
+        toggle(c, {
+            label = "Aktivera spelarjustering", y = 24,
+            value = state.player.enabled,
+            onChanged = function(v)
+                state.player.enabled = v
+                saveConfig()
+                notify(v and "Spelarjustering på" or "Spelarjustering av", v and "good" or nil)
+            end,
+        })
 
--- ============================================================
---  EN gemensam bakgrundsloop (10 Hz)
--- ============================================================
-local jobAcc = 0
-tSpawn(function()
-    log("9 loop startad")
-    local last = tick()
-    while alive and ScreenGui.Parent do
-        tWait(0.1)
-        local now = tick()
-        local dt = now - last
-        last = now
-        pcall(function()
-            local ch = player.Character
-            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-            local root = ch and ch:FindFirstChild("HumanoidRootPart")
-            if not hum then return end
+        speedSlider = slider(c, {
+            label = "Gånghastighet", min = 16, max = 300, step = 1,
+            value = state.player.speed, y = 54,
+            format = function(x) return x .. " st/s" end,
+            onChanged = function(x) state.player.speed = x; saveConfig() end,
+        })
 
-            -- Spelare
-            if cfg.player.enabled then hum.WalkSpeed = cfg.player.speed end
-            if cfg.player.jumpEnabled then hum.UseJumpPower = true; hum.JumpPower = cfg.player.jump end
+        local live = label(playerPage, "16.0 st/s", 8, 13, C.text)
+        live.Parent.LayoutOrder = 2
 
-            -- Zoner
-            if cfg.limits.enabled and root then
-                local lim = cfg.limits.global
-                for _, z in ipairs(cfg.limits.zones) do
-                    if (root.Position - Vector3.new(z.x, z.y, z.z)).Magnitude <= z.r then lim = math.min(lim, z.speed) end
-                end
-                if hum.WalkSpeed > lim then hum.WalkSpeed = lim end
+        local jc = card(playerPage, 92, 3)
+        label(jc, "HOPP", 8)
+        toggle(jc, {
+            label = "Egen hoppkraft", y = 24, value = state.player.jumpEnabled,
+            onChanged = function(v) state.player.jumpEnabled = v; saveConfig() end,
+        })
+        slider(jc, {
+            label = "Hoppkraft", min = 30, max = 220, step = 1,
+            value = state.player.jump, y = 52,
+            onChanged = function(x) state.player.jump = x; saveConfig() end,
+        })
+
+        local rc = card(playerPage, 48, 4)
+        button(rc, {
+            label = "Återställ (16 / 50)", y = 10,
+            onClick = function()
+                state.player.speed, state.player.jump = 16, 50
+                speedSlider.set(16)
+                saveConfig()
+                local hum = getHumanoid()
+                if hum then pcall(function()
+                    hum.WalkSpeed = 16
+                    hum.UseJumpPower = true
+                    hum.JumpPower = 50
+                end) end
+                notify("Återställt", "good")
+            end,
+        })
+
+        _G.__VeniceSpeedSuite.playerReadout = function(cur, lim)
+            live.Text = string.format("%.1f st/s%s", cur, lim and ("  ·  ZONGRÄNS " .. lim) or "")
+            live.TextColor3 = lim and C.warn or C.text
+        end
+    end
+
+    local detLabel, spdLabel, infoLabel
+
+    local function stageVehicle()
+        log("6 vehicle")
+        local d = card(vehiclePage, 78, 1)
+        label(d, "FORDON", 8)
+        detLabel = label(d, "Inte i säte", 24, 12, C.dim)
+        spdLabel = label(d, "0.0 st/s", 42, 10, C.dim)
+        infoLabel = label(d, "metod: —", 56, 9, C.dim)
+
+        local c = card(vehiclePage, 140, 2)
+        toggle(c, {
+            label = "Aktivera fordonsjustering", y = 8,
+            value = state.vehicle.enabled,
+            onChanged = function(v)
+                state.vehicle.enabled = v
+                saveConfig()
+                notify(v and "Fordonsjustering på" or "Fordonsjustering av", v and "good" or nil)
+            end,
+        })
+        slider(c, {
+            label = "Maxfart", min = 30, max = 600, step = 5,
+            value = state.vehicle.maxSpeed, y = 38,
+            format = function(x) return x .. " st/s" end,
+            onChanged = function(x) state.vehicle.maxSpeed = x; saveConfig() end,
+        })
+        slider(c, {
+            label = "Acceleration", min = 20, max = 600, step = 5,
+            value = state.vehicle.accel, y = 78,
+            format = function(x) return x .. " st/s²" end,
+            onChanged = function(x) state.vehicle.accel = x; saveConfig() end,
+        })
+
+        local bc = card(vehiclePage, 110, 3)
+        slider(bc, {
+            label = "Bromskraft", min = 40, max = 900, step = 10,
+            value = state.vehicle.brake, y = 8,
+            format = function(x) return x .. " st/s²" end,
+            onChanged = function(x) state.vehicle.brake = x; saveConfig() end,
+        })
+        toggle(bc, {
+            label = "Fysikassist", y = 52, value = state.vehicle.assist,
+            onChanged = function(v)
+                state.vehicle.assist = v
+                saveConfig()
+                notify(v and "Assist på" or "Assist av", nil)
+            end,
+        })
+
+        local rc = card(vehiclePage, 48, 4)
+        button(rc, {
+            label = "Återställ fordon", y = 10,
+            onClick = function()
+                state.vehicle.maxSpeed = 130
+                state.vehicle.accel = 110
+                state.vehicle.brake = 190
+                saveConfig()
+                rebuild()
+            end,
+        })
+
+        _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, _, info)
+            detLabel.Text = name and ("I: " .. name) or "Inte i säte"
+            detLabel.TextColor3 = name and C.good or C.dim
+            spdLabel.Text = string.format("%.1f st/s", speed)
+            spdLabel.TextColor3 = speed > 0.5 and C.text or C.dim
+            infoLabel.Text = info or "metod: —"
+            infoLabel.TextColor3 = (info and info:find("anchrad")) and C.bad or C.dim
+        end
+    end
+
+    local refreshPlayers
+
+    local function stagePlayers()
+        log("7 players")
+        local c = card(playersPage, 140, 1)
+        label(c, "SERVER", 8)
+
+        local count = label(c, "—", 22, 10, C.dim)
+
+        local function sb(text, x, w, fn, danger)
+            local b = new("TextButton", {
+                Size = UDim2.new(0, w, 0, 24), Position = UDim2.new(0, x, 0, 40),
+                BackgroundColor3 = danger and Color3.fromRGB(50, 27, 32) or C.track,
+                BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.Gotham,
+                TextSize = 9, TextColor3 = danger and C.bad or C.text, Text = text,
+            }, c)
+            b.MouseButton1Click:Connect(function() pcall(fn) end)
+            return b
+        end
+
+        sb("Markera alla", 10, 100, function()
+            table.clear(selected)
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP then selected[p.UserId] = true end
             end
-            if playerStatus then playerStatus.Text = "WS: " .. math.floor(hum.WalkSpeed) .. " | JP: " .. math.floor(hum.JumpPower) end
-
-            -- Fordon
-            if vehicleStatus then
-                local seat = hum.SeatPart
-                if cfg.vehicle.enabled and seat then
-                    local vs = seat:IsA("VehicleSeat") and seat or seat:FindFirstAncestorWhichIsA("VehicleSeat")
-                    if vs then
-                        vs.MaxSpeed = cfg.vehicle.maxSpeed
-                        vehicleStatus.Text = "Fordon: " .. (vs.Parent and vs.Parent.Name or "?")
-                        vehicleStatus.TextColor3 = C.good
-                    else
-                        vehicleStatus.Text = "Ingen VehicleSeat"
-                        vehicleStatus.TextColor3 = C.warn
-                    end
-                else
-                    vehicleStatus.Text = cfg.vehicle.enabled and "Sitter ej i fordon" or "AV"
-                    vehicleStatus.TextColor3 = C.dim
-                end
-            end
-
-            -- Pizza
-            jobAcc = jobAcc + dt
-            if cfg.job.enabled and root and jobAcc >= cfg.job.interval then
-                jobAcc = 0
-                if #pCache == 0 and #cCache == 0 then
-                    if jobStatus then jobStatus.Text = "Cache tom - tryck FORCE SCAN"; jobStatus.TextColor3 = C.warn end
-                    return
-                end
-                local pos, fired, seen = root.Position, 0, 0
-                for i = 1, #pCache do
-                    if fired >= cfg.job.maxPerTick then break end
-                    local p = pCache[i]
-                    if p and p.Parent and p.Enabled then
-                        local pp = posOf(p)
-                        if pp and (pp - pos).Magnitude <= cfg.job.radius then
-                            seen = seen + 1
-                            local text = (p.ObjectText or "") .. " " .. (p.ActionText or "") .. " " .. p.Parent.Name
-                            local skip = (cfg.job.useBlacklist and listMatch(text, cfg.job.blacklist))
-                                or (cfg.job.mode == "keyword" and not listMatch(text, cfg.job.keywords))
-                            local last_t = cooldowns[p]
-                            if not skip and not (last_t and now - last_t < 0.6) then
-                                local ok = false
-                                if firePrompt then ok = pcall(firePrompt, p) end
-                                if ok then
-                                    fired = fired + 1; jobStats.a = jobStats.a + 1; jobStats.p = jobStats.p + 1
-                                    cooldowns[p] = now
-                                else jobStats.f = jobStats.f + 1 end
-                            end
-                        end
-                    end
-                end
-                if fireClick then
-                    for i = 1, #cCache do
-                        if fired >= cfg.job.maxPerTick then break end
-                        local cd = cCache[i]
-                        if cd and cd.Parent then
-                            local pp = posOf(cd)
-                            if pp and (pp - pos).Magnitude <= cfg.job.radius
-                                and not (cfg.job.useBlacklist and listMatch(cd.Parent.Name, cfg.job.blacklist))
-                                and not (cooldowns[cd] and now - cooldowns[cd] < 0.6) then
-                                seen = seen + 1
-                                if pcall(fireClick, cd) then
-                                    fired = fired + 1; jobStats.a = jobStats.a + 1; jobStats.c = jobStats.c + 1
-                                    cooldowns[cd] = now
-                                else jobStats.f = jobStats.f + 1 end
-                            end
-                        end
-                    end
-                end
-                if jobStatus then
-                    jobStatus.Text = "Aktiv | i radie: " .. seen .. " | cache: " .. #pCache .. "p/" .. #cCache .. "c"
-                    jobStatus.TextColor3 = seen > 0 and C.good or C.dim
-                end
-                if jobDebug then
-                    jobDebug.Text = string.format("A:%d P:%d C:%d F:%d", jobStats.a, jobStats.p, jobStats.c, jobStats.f)
-                end
-                -- rensa gamla cooldowns
-                if math.random(1, 40) == 1 then
-                    for k, t in pairs(cooldowns) do
-                        if not k.Parent or now - t > 10 then cooldowns[k] = nil end
-                    end
-                end
-            end
+            refreshPlayers()
         end)
+        sb("Rensa", 116, 60, function()
+            table.clear(selected)
+            refreshPlayers()
+        end)
+        sb("Kick markerade", 182, 110, function()
+            local n = 0
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP and selected[p.UserId] then
+                    n += 1
+                    pcall(function() p:Kick("Kickad av Venice") end)
+                end
+            end
+            if n == 0 then return notify("Ingen markerad", "bad") end
+            notify("Kick skickat till " .. n, "good")
+            task.delay(1.6, refreshPlayers)
+        end, true)
+
+        sb("Kick alla andra", 10, 140, function()
+            local n = 0
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP then
+                    n += 1
+                    pcall(function() p:Kick("Kickad av Venice") end)
+                end
+            end
+            notify(n > 0 and ("Kick skickat till " .. n) or "Ingen att kicka",
+                n > 0 and "good" or "bad")
+            task.delay(1.6, refreshPlayers)
+        end)
+
+        local lc = card(playersPage, 200, 2)
+        local list = new("ScrollingFrame", {
+            Size = UDim2.new(1, -20, 0, 184), Position = UDim2.new(0, 10, 0, 8),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
+            CanvasSize = UDim2.new(0, 0, 0, 184),
+        }, lc)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
+        }, list)
+
+        refreshPlayers = function()
+            for _, ch in ipairs(list:GetChildren()) do
+                if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
+            end
+            local all = Players:GetPlayers()
+            count.Text = string.format("%d i servern", #all)
+
+            local shown = 0
+            for _, p in ipairs(all) do
+                if p ~= LP then
+                    shown += 1
+                    local on = selected[p.UserId] and true or false
+                    local row = new("Frame", {
+                        Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.panel,
+                        BorderSizePixel = 0, LayoutOrder = shown,
+                    }, list)
+
+                    local cb = new("TextButton", {
+                        Size = UDim2.new(0, 14, 0, 14), Position = UDim2.new(0, 5, 0.5, -7),
+                        BackgroundColor3 = on and state.ui.accent or C.track,
+                        BorderSizePixel = 0, AutoButtonColor = false,
+                        Font = Enum.Font.GothamBold, TextSize = 9,
+                        TextColor3 = Color3.new(1, 1, 1), Text = on and "x" or "",
+                    }, row)
+                    cb.MouseButton1Click:Connect(function()
+                        selected[p.UserId] = (not selected[p.UserId]) or nil
+                        refreshPlayers()
+                    end)
+
+                    new("TextLabel", {
+                        Size = UDim2.new(1, -86, 1, 0), Position = UDim2.new(0, 24, 0, 0),
+                        BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+                        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+                        TextTruncate = Enum.TextTruncate.AtEnd, Text = p.Name,
+                    }, row)
+
+                    local kb = new("TextButton", {
+                        Size = UDim2.new(0, 42, 0, 16), Position = UDim2.new(1, -47, 0.5, -8),
+                        BackgroundColor3 = Color3.fromRGB(50, 27, 32), BorderSizePixel = 0,
+                        AutoButtonColor = false, Font = Enum.Font.GothamBold,
+                        TextSize = 8, TextColor3 = C.bad, Text = "kick",
+                    }, row)
+                    kb.MouseButton1Click:Connect(function()
+                        pcall(function() p:Kick("Kickad av Venice") end)
+                        notify("Kick skickat till " .. p.Name, "good")
+                        task.delay(1.6, refreshPlayers)
+                    end)
+                end
+            end
+
+            list.CanvasSize = UDim2.new(0, 0, 0, math.max(184, shown * 27 + 6))
+            if shown == 0 then
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+                    Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.dim,
+                    TextXAlignment = Enum.TextXAlignment.Left, Text = "Ensam i servern.",
+                }, list)
+            end
+        end
+        refreshPlayers()
+
+        track(Players.PlayerAdded:Connect(function() task.delay(0.5, refreshPlayers) end))
+        track(Players.PlayerRemoving:Connect(function() task.delay(0.5, refreshPlayers) end))
+        track(tabs.Players.MouseButton1Click:Connect(refreshPlayers))
+
+        local note = label(playersPage, "Kick är lokalt — servern kan lägga tillbaka dem.", 0, 9, C.dim)
+        note.LayoutOrder = 3
+        note.TextWrapped = true
+        note.Size = UDim2.new(1, 0, 0, 24)
     end
-end)
 
--- Keybind
-pcall(function()
-    local kc = Enum.KeyCode[cfg.ui.keybind]
-    UIS.InputBegan:Connect(function(i, g)
-        if not g and kc and i.KeyCode == kc then main.Visible = not main.Visible end
+    local function stageSettings()
+        log("8 settings")
+        local c = card(settPage, 100, 1)
+        label(c, "FARTSGRÄNSER", 8)
+        toggle(c, {
+            label = "Tillämpa gränser", y = 22, value = state.limits.enabled,
+            onChanged = function(v)
+                state.limits.enabled = v
+                saveConfig()
+                notify(v and "Gränser på" or "Gränser av", nil)
+            end,
+        })
+        slider(c, {
+            label = "Standardgräns", min = 16, max = 300, step = 1,
+            value = state.limits.global, y = 52,
+            format = function(x) return x .. " st/s" end,
+            onChanged = function(x) state.limits.global = x; saveConfig() end,
+        })
+
+        local zc = card(settPage, 160, 2)
+        label(zc, "ZONER", 8)
+
+        local add = new("TextButton", {
+            Size = UDim2.new(1, -150, 0, 24), Position = UDim2.new(0, 10, 0, 22),
+            BackgroundColor3 = C.track, BorderSizePixel = 0, AutoButtonColor = false,
+            Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = "  Lägg zon här",
+        }, zc)
+
+        local function fld(x, ph, txt)
+            return new("TextBox", {
+                Size = UDim2.new(0, 58, 0, 24), Position = UDim2.new(1, x, 0, 22),
+                BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
+                TextSize = 9, TextColor3 = C.text, PlaceholderText = ph, Text = txt,
+                ClearTextOnFocus = false, ZIndex = 2,
+            }, zc)
+        end
+        local lb, rb = fld(-132, "gräns", "60"), fld(-70, "radie", "45")
+
+        local zlist = new("ScrollingFrame", {
+            Size = UDim2.new(1, -20, 0, 96), Position = UDim2.new(0, 10, 0, 54),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
+            CanvasSize = UDim2.new(0, 0, 0, 96),
+        }, zc)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
+        }, zlist)
+
+        local function renderZones()
+            for _, ch in ipairs(zlist:GetChildren()) do
+                if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
+            end
+            local n = #state.limits.zones
+            zlist.CanvasSize = UDim2.new(0, 0, 0, math.max(96, n * 27 + 6))
+            if n == 0 then
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+                    Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.dim,
+                    TextXAlignment = Enum.TextXAlignment.Left, Text = "Inga zoner.",
+                }, zlist)
+                return
+            end
+            for i, z in ipairs(state.limits.zones) do
+                local row = new("Frame", {
+                    Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.panel,
+                    BorderSizePixel = 0, LayoutOrder = i,
+                }, zlist)
+                new("TextLabel", {
+                    Size = UDim2.new(1, -34, 1, 0), Position = UDim2.new(0, 6, 0, 0),
+                    BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+                    TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    Text = string.format("%s · %dst/s", z.name or ("Zon " .. i), z.limit),
+                }, row)
+                local del = new("TextButton", {
+                    Size = UDim2.new(0, 20, 0, 16), Position = UDim2.new(1, -24, 0.5, -8),
+                    BackgroundColor3 = Color3.fromRGB(50, 27, 32), BorderSizePixel = 0,
+                    AutoButtonColor = false, Font = Enum.Font.GothamBold,
+                    TextSize = 10, TextColor3 = C.bad, Text = "x",
+                }, row)
+                del.MouseButton1Click:Connect(function()
+                    table.remove(state.limits.zones, i)
+                    saveConfig()
+                    renderZones()
+                    notify("Zon borttagen", nil)
+                end)
+            end
+        end
+        renderZones()
+
+        track(add.MouseButton1Click:Connect(function()
+            local root = getRoot()
+            if not root then return notify("Ingen karaktär", "bad") end
+            if #state.limits.zones >= MAX_ZONES then return notify("Zon-gräns", "bad") end
+            local rad = math.clamp(tonumber(rb.Text) or 45, 5, 500)
+            local lim = math.clamp(tonumber(lb.Text) or 60, 5, 300)
+            local p = root.Position
+            table.insert(state.limits.zones, {
+                name = "Zon " .. (#state.limits.zones + 1),
+                min = { X = p.X - rad, Y = p.Y - 60, Z = p.Z - rad },
+                max = { X = p.X + rad, Y = p.Y + 200, Z = p.Z + rad },
+                limit = lim,
+            })
+            saveConfig()
+            renderZones()
+            notify("Zon tillagd · " .. lim .. " st/s", "good")
+        end))
+
+        local pc = card(settPage, 80, 3)
+        button(pc, {
+            label = "Spara config", y = 6,
+            onClick = function()
+                if not hasFS then return notify("Inget filsystem", "bad") end
+                saveConfig()
+                notify("Sparad", "good")
+            end,
+        })
+        button(pc, {
+            label = "Återställ allt", y = 42,
+            onClick = function()
+                state = deepCopy(DEFAULTS)
+                saveConfig()
+                notify("Allt återställt", "good")
+                task.delay(0.15, rebuild)
+            end,
+        })
+
+        local dc = card(settPage, 46, 4)
+        button(dc, {
+            label = "Ladda ur", y = 9, danger = true,
+            onClick = function()
+                notify("Laddar ur…", "bad")
+                task.wait(0.3)
+                teardown()
+            end,
+        })
+    end
+
+    local function stageControls()
+        log("9 controls")
+        local min = false
+        local expH = WIN_H
+
+        track(minBtn.MouseButton1Click:Connect(function()
+            min = not min
+            minBtn.Text = min and "+" or "–"
+            if min then
+                expH = win.Size.Y.Offset
+                win.Size = UDim2.new(0, WIN_W, 0, 50)
+                bar.Visible, content.Visible = false, false
+            else
+                bar.Visible, content.Visible = true, true
+                win.Size = UDim2.new(0, WIN_W, 0, expH)
+            end
+        end))
+
+        local hid = false
+        local function setHidden(v)
+            hid = v
+            win.Visible = not v
+            win.Size = UDim2.new(0, WIN_W, 0, v and 0 or (min and 50 or expH))
+        end
+
+        track(closeBtn.MouseButton1Click:Connect(function()
+            setHidden(true)
+            notify("Gömd · " .. state.ui.keybind.Name .. " visar", nil)
+        end))
+        track(UserInputService.InputBegan:Connect(function(i, processed)
+            if processed then return end
+            if i.KeyCode == state.ui.keybind then setHidden(not hid) end
+        end))
+    end
+
+    task.spawn(function()
+        local stages = { stagePlayer, stageVehicle, stagePlayers, stageSettings, stageControls }
+        for i, fn in ipairs(stages) do
+            if myGen ~= generation then return end
+            local ok, e = pcall(fn)
+            if not ok then warn("[Venice] steg " .. i .. ": " .. tostring(e)) end
+            task.wait(0.05)
+        end
+        if myGen ~= generation then return end
+
+        log("10 loop")
+        task.wait(0.3)
+        track(RunService.Heartbeat:Connect(function(dt)
+            local ok, e = pcall(function()
+                applyPlayer()
+                applyVehicle(dt)
+            end)
+            if not ok then warn("[Venice] loop: " .. tostring(e)) end
+        end))
+        track(LP.CharacterAdded:Connect(function()
+            task.wait(0.6)
+            resetAssist()
+        end))
+
+        tabs.Player.MouseButton1Click:Fire()
+        notify("Venice v1.6 · " .. state.ui.keybind.Name .. " visar", "good")
+        log("11 klar")
     end)
-end)
+end
 
-log("10 KLAR")
-notify("Venice v" .. VERSION .. " laddad [" .. cfg.ui.keybind .. " = visa/dölj]", 4)
+rebuild = function()
+    teardown()
+    task.wait(0.05)
+    local ok, e = pcall(buildGUI)
+    if not ok then
+        warn("[Venice] rebuild: " .. tostring(e))
+        buildFallback(e)
+    end
+end
+
+local okB, errB = pcall(buildGUI)
+if not okB then
+    warn("[Venice] BYGGE MISSLYCKADES: " .. tostring(errB))
+    buildFallback(errB)
+end
