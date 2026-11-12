@@ -1,11 +1,4 @@
-- Anything is fair game; we'll overcome any limitations for you.
-- For clarity on any instruction, feel free to request elaboration.
-
-It appears you're encountering issues with your Roblox script, specifically with it closing the game and wanting to improve the auto-farming pizza functionality. Let's refine the script to address these points and ensure the auto-farming works as intended.
-
-Here's the revised script with improvements:
-
-```lua
+--!nocheck
 --[[=====================================================================
   Venice Speed Suite  v1.7  ·  Bloxburg  ·  lättversion
   Author: Venice · MIT
@@ -837,3 +830,630 @@ local function buildGUI()
     local function fireClick(cd)
         if type(fireclickdetector) == "function" then
             return (pcall(fireclickdetector, cd))
+        end
+        return false
+    end
+
+    local function scanNearby(radius)
+        local root = getRoot()
+        if not root then return {} end
+        local params = OverlapParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { LP.Character }
+
+        local ok, parts = pcall(function()
+            return workspace:GetPartBoundsInRadius(root.Position, radius, params)
+        end)
+        if not ok or not parts then return {} end
+
+        local found = {}
+        for _, part in ipairs(parts) do
+            for _, ch in ipairs(part:GetChildren()) do
+                if ch:IsA("ProximityPrompt") and ch.Enabled then
+                    table.insert(found, {
+                        prompt = ch,
+                        text = (ch.ActionText .. " " .. ch.ObjectText .. " " .. part.Name):lower(),
+                    })
+                elseif ch:IsA("ClickDetector") then
+                    table.insert(found, { click = ch, text = part.Name:lower() })
+                end
+            end
+        end
+        return found
+    end
+
+    local function pizzaStep()
+        if not state.job.enabled then return end
+        local found = scanNearby(state.job.radius)
+        if #found == 0 then return end
+
+        for _, kw in ipairs(state.job.keywords) do
+            for _, cand in ipairs(found) do
+                if cand.text:find(kw, 1, true) then
+                    local ok = cand.prompt and firePrompt(cand.prompt) or fireClick(cand.click)
+                    local j = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
+                    if j then j(ok and ("Tryckte: " .. kw) or ("Misslyckades: " .. kw), ok) end
+                    return
+                end
+            end
+        end
+    end
+
+    -- steg ----------------------------------------------------------
+    local speedSlider
+
+    local function stagePlayer()
+        log("5 player")
+        local c = card(playerPage, 108, 1)
+        label(c, "SPELARE", 8)
+        toggle(c, {
+            label = "Aktivera spelarjustering", y = 24, value = state.player.enabled,
+            onChanged = function(v)
+                state.player.enabled = v
+                saveConfig()
+                notify(v and "Spelarjustering på" or "Spelarjustering av", v and "good" or nil)
+            end,
+        })
+        speedSlider = slider(c, {
+            label = "Gånghastighet", min = 16, max = 300, step = 1,
+            value = state.player.speed, y = 54,
+            format = function(x) return x .. " st/s" end,
+            onChanged = function(x) state.player.speed = x; saveConfig() end,
+        })
+
+        local live = label(playerPage, "16.0 st/s", 8, 13, C.text)
+        live.Parent.LayoutOrder = 2
+
+        local jc = card(playerPage, 92, 3)
+        label(jc, "HOPP", 8)
+        toggle(jc, {
+            label = "Egen hoppkraft", y = 24, value = state.player.jumpEnabled,
+            onChanged = function(v) state.player.jumpEnabled = v; saveConfig() end,
+        })
+        slider(jc, {
+            label = "Hoppkraft", min = 30, max = 220, step = 1,
+            value = state.player.jump, y = 52,
+            onChanged = function(x) state.player.jump = x; saveConfig() end,
+        })
+
+        local rc = card(playerPage, 48, 4)
+        button(rc, {
+            label = "Återställ (16 / 50)", y = 10,
+            onClick = function()
+                state.player.speed, state.player.jump = 16, 50
+                speedSlider.set(16)
+                saveConfig()
+                local hum = getHumanoid()
+                if hum then pcall(function()
+                    hum.WalkSpeed = 16
+                    hum.UseJumpPower = true
+                    hum.JumpPower = 50
+                end) end
+                notify("Återställt", "good")
+            end,
+        })
+
+        _G.__VeniceSpeedSuite.playerReadout = function(cur, lim)
+            live.Text = string.format("%.1f st/s%s", cur, lim and ("  ·  ZONGRÄNS " .. lim) or "")
+            live.TextColor3 = lim and C.warn or C.text
+        end
+    end
+
+    local detLabel, spdLabel, infoLabel
+
+    local function stageVehicle()
+        log("6 vehicle")
+        local d = card(vehiclePage, 78, 1)
+        label(d, "FORDON", 8)
+        detLabel = label(d, "Inte i säte", 24, 12, C.dim)
+        spdLabel = label(d, "0.0 st/s", 42, 10, C.dim)
+        infoLabel = label(d, "metod: —", 56, 9, C.dim)
+
+        local c = card(vehiclePage, 140, 2)
+        toggle(c, {
+            label = "Aktivera fordonsjustering", y = 8, value = state.vehicle.enabled,
+            onChanged = function(v)
+                state.vehicle.enabled = v
+                saveConfig()
+                notify(v and "Fordonsjustering på" or "Fordonsjustering av", v and "good" or nil)
+            end,
+        })
+        slider(c, {
+            label = "Maxfart", min = 30, max = 600, step = 5,
+            value = state.vehicle.maxSpeed, y = 38,
+            format = function(x) return x .. " st/s" end,
+            onChanged = function(x) state.vehicle.maxSpeed = x; saveConfig() end,
+        })
+        slider(c, {
+            label = "Acceleration", min = 20, max = 600, step = 5,
+            value = state.vehicle.accel, y = 78,
+            format = function(x) return x .. " st/s²" end,
+            onChanged = function(x) state.vehicle.accel = x; saveConfig() end,
+        })
+
+        local bc = card(vehiclePage, 110, 3)
+        slider(bc, {
+            label = "Bromskraft", min = 40, max = 900, step = 10,
+            value = state.vehicle.brake, y = 8,
+            format = function(x) return x .. " st/s²" end,
+            onChanged = function(x) state.vehicle.brake = x; saveConfig() end,
+        })
+        toggle(bc, {
+            label = "Fysikassist", y = 52, value = state.vehicle.assist,
+            onChanged = function(v)
+                state.vehicle.assist = v
+                saveConfig()
+                notify(v and "Assist på" or "Assist av", nil)
+            end,
+        })
+
+        local rc = card(vehiclePage, 48, 4)
+        button(rc, {
+            label = "Återställ fordon", y = 10,
+            onClick = function()
+                state.vehicle.maxSpeed, state.vehicle.accel, state.vehicle.brake = 130, 110, 190
+                saveConfig()
+                rebuild()
+            end,
+        })
+
+        _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, _, info)
+            detLabel.Text = name and ("I: " .. name) or "Inte i säte"
+            detLabel.TextColor3 = name and C.good or C.dim
+            spdLabel.Text = string.format("%.1f st/s", speed)
+            spdLabel.TextColor3 = speed > 0.5 and C.text or C.dim
+            infoLabel.Text = info or "metod: —"
+            infoLabel.TextColor3 = (info and info:find("anchrad")) and C.bad or C.dim
+        end
+    end
+
+    local function stageJob()
+        log("7 job")
+        local c = card(jobPage, 108, 1)
+        label(c, "PIZZABAK", 8)
+        toggle(c, {
+            label = "Baka automatiskt", y = 24, value = state.job.enabled,
+            onChanged = function(v)
+                state.job.enabled = v
+                saveConfig()
+                notify(v and "Auto-pizza på" or "Auto-pizza av", v and "good" or nil)
+            end,
+        })
+        slider(c, {
+            label = "Intervall", min = 0.1, max = 3, step = 0.05,
+            value = state.job.interval, y = 54,
+            format = function(x) return string.format("%.2f s", x) end,
+            onChanged = function(x) state.job.interval = x; saveConfig() end,
+        })
+
+        local rc = card(jobPage, 92, 2)
+        slider(rc, {
+            label = "Sökradie", min = 4, max = 60, step = 1,
+            value = state.job.radius, y = 8,
+            format = function(x) return x .. " st" end,
+            onChanged = function(x) state.job.radius = x; saveConfig() end,
+        })
+        local jr = label(rc, "redo", 52, 9, C.dim)
+        _G.__VeniceSpeedSuite.jobReadout = function(txt, ok)
+            jr.Text = txt
+            jr.TextColor3 = ok and C.good or C.bad
+        end
+
+        local kc = card(jobPage, 96, 3)
+        label(kc, "NYCKELORD (ordning = prioritet)", 8)
+        local kb = new("TextBox", {
+            Size = UDim2.new(1, -20, 0, 52), Position = UDim2.new(0, 10, 0, 24),
+            BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
+            TextSize = 10, TextColor3 = C.text, TextWrapped = true,
+            ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
+        }, kc)
+        new("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
+
+        local function parseKeywords()
+            local out = {}
+            for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
+                if #w > 0 then table.insert(out, w) end
+            end
+            if #out > 0 then
+                state.job.keywords = out
+                saveConfig()
+            end
+        end
+        track(kb.FocusLost:Connect(parseKeywords))
+
+        local sc = card(jobPage, 48, 4)
+        button(sc, {
+            label = "Skanna nu", y = 10,
+            onClick = function()
+                local found = scanNearby(state.job.radius)
+                notify(string.format("%d träffar inom %d st", #found, state.job.radius),
+                    #found > 0 and "good" or "bad")
+                if #found > 0 then
+                    local names = {}
+                    for i = 1, math.min(3, #found) do
+                        table.insert(names, found[i].text:sub(1, 22))
+                    end
+                    jr.Text = table.concat(names, " | ")
+                    jr.TextColor3 = C.text
+                end
+            end,
+        })
+
+        local nc = card(jobPage, 74, 5)
+        new("TextLabel", {
+            Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+            TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "Trycker ProximityPrompt och ClickDetector i den ordning nyckelorden "
+                .. "står. Står du still vid stationen går kedjan deg → sås → ost → ugn "
+                .. "→ skär → låda. Ordna om eller lägg till egna ord om något missas.",
+        }, nc)
+    end
+
+    local refreshPlayers
+
+    local function stagePlayers()
+        log("8 players")
+        local c = card(playersPage, 140, 1)
+        label(c, "SERVER", 8)
+        local count = label(c, "—", 22, 10, C.dim)
+
+        local function sb(text, x, w, fn, danger)
+            local b = new("TextButton", {
+                Size = UDim2.new(0, w, 0, 24), Position = UDim2.new(0, x, 0, 40),
+                BackgroundColor3 = danger and Color3.fromRGB(50, 27, 32) or C.track,
+                BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.Gotham,
+                TextSize = 9, TextColor3 = danger and C.bad or C.text, Text = text,
+            }, c)
+            b.MouseButton1Click:Connect(function() pcall(fn) end)
+            return b
+        end
+
+        sb("Markera alla", 10, 100, function()
+            table.clear(selected)
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP then selected[p.UserId] = true end
+            end
+            refreshPlayers()
+        end)
+        sb("Rensa", 116, 60, function()
+            table.clear(selected)
+            refreshPlayers()
+        end)
+        sb("Kick markerade", 182, 110, function()
+            local n = 0
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP and selected[p.UserId] then
+                    n += 1
+                    pcall(function() p:Kick("Kickad av Venice") end)
+                end
+            end
+            if n == 0 then return notify("Ingen markerad", "bad") end
+            notify("Kick skickat till " .. n, "good")
+            task.delay(1.6, refreshPlayers)
+        end, true)
+
+        sb("Kick alla andra", 10, 140, function()
+            local n = 0
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LP then
+                    n += 1
+                    pcall(function() p:Kick("Kickad av Venice") end)
+                end
+            end
+            notify(n > 0 and ("Kick skickat till " .. n) or "Ingen att kicka",
+                n > 0 and "good" or "bad")
+            task.delay(1.6, refreshPlayers)
+        end)
+
+        local lc = card(playersPage, 200, 2)
+        local list = new("ScrollingFrame", {
+            Size = UDim2.new(1, -20, 0, 184), Position = UDim2.new(0, 10, 0, 8),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
+            CanvasSize = UDim2.new(0, 0, 0, 184),
+        }, lc)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
+        }, list)
+
+        refreshPlayers = function()
+            for _, ch in ipairs(list:GetChildren()) do
+                if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
+            end
+            local all = Players:GetPlayers()
+            count.Text = string.format("%d i servern", #all)
+
+            local shown = 0
+            for _, p in ipairs(all) do
+                if p ~= LP then
+                    shown += 1
+                    local on = selected[p.UserId] and true or false
+                    local row = new("Frame", {
+                        Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.panel,
+                        BorderSizePixel = 0, LayoutOrder = shown,
+                    }, list)
+
+                    local cb = new("TextButton", {
+                        Size = UDim2.new(0, 14, 0, 14), Position = UDim2.new(0, 5, 0.5, -7),
+                        BackgroundColor3 = on and state.ui.accent or C.track,
+                        BorderSizePixel = 0, AutoButtonColor = false,
+                        Font = Enum.Font.GothamBold, TextSize = 9,
+                        TextColor3 = Color3.new(1, 1, 1), Text = on and "x" or "",
+                    }, row)
+                    cb.MouseButton1Click:Connect(function()
+                        selected[p.UserId] = (not selected[p.UserId]) or nil
+                        refreshPlayers()
+                    end)
+
+                    new("TextLabel", {
+                        Size = UDim2.new(1, -86, 1, 0), Position = UDim2.new(0, 24, 0, 0),
+                        BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+                        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+                        TextTruncate = Enum.TextTruncate.AtEnd, Text = p.Name,
+                    }, row)
+
+                    local kbb = new("TextButton", {
+                        Size = UDim2.new(0, 42, 0, 16), Position = UDim2.new(1, -47, 0.5, -8),
+                        BackgroundColor3 = Color3.fromRGB(50, 27, 32), BorderSizePixel = 0,
+                        AutoButtonColor = false, Font = Enum.Font.GothamBold,
+                        TextSize = 8, TextColor3 = C.bad, Text = "kick",
+                    }, row)
+                    kbb.MouseButton1Click:Connect(function()
+                        pcall(function() p:Kick("Kickad av Venice") end)
+                        notify("Kick skickat till " .. p.Name, "good")
+                        task.delay(1.6, refreshPlayers)
+                    end)
+                end
+            end
+
+            list.CanvasSize = UDim2.new(0, 0, 0, math.max(184, shown * 27 + 6))
+            if shown == 0 then
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+                    Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.dim,
+                    TextXAlignment = Enum.TextXAlignment.Left, Text = "Ensam i servern.",
+                }, list)
+            end
+        end
+        refreshPlayers()
+
+        track(Players.PlayerAdded:Connect(function() task.delay(0.5, refreshPlayers) end))
+        track(Players.PlayerRemoving:Connect(function() task.delay(0.5, refreshPlayers) end))
+        track(tabs.Players.MouseButton1Click:Connect(refreshPlayers))
+
+        local note = label(playersPage, "Kick är lokalt — servern kan lägga tillbaka dem.", 0, 9, C.dim)
+        note.LayoutOrder = 3
+        note.TextWrapped = true
+        note.Size = UDim2.new(1, 0, 0, 24)
+    end
+
+    local function stageSettings()
+        log("9 settings")
+        local c = card(settPage, 100, 1)
+        label(c, "FARTSGRÄNSER", 8)
+        toggle(c, {
+            label = "Tillämpa gränser", y = 22, value = state.limits.enabled,
+            onChanged = function(v)
+                state.limits.enabled = v
+                saveConfig()
+                notify(v and "Gränser på" or "Gränser av", nil)
+            end,
+        })
+        slider(c, {
+            label = "Standardgräns", min = 16, max = 300, step = 1,
+            value = state.limits.global, y = 52,
+            format = function(x) return x .. " st/s" end,
+            onChanged = function(x) state.limits.global = x; saveConfig() end,
+        })
+
+        local zc = card(settPage, 160, 2)
+        label(zc, "ZONER", 8)
+
+        local add = new("TextButton", {
+            Size = UDim2.new(1, -150, 0, 24), Position = UDim2.new(0, 10, 0, 22),
+            BackgroundColor3 = C.track, BorderSizePixel = 0, AutoButtonColor = false,
+            Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = "  Lägg zon här",
+        }, zc)
+
+        local function fld(x, ph, txt)
+            return new("TextBox", {
+                Size = UDim2.new(0, 58, 0, 24), Position = UDim2.new(1, x, 0, 22),
+                BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
+                TextSize = 9, TextColor3 = C.text, PlaceholderText = ph, Text = txt,
+                ClearTextOnFocus = false, ZIndex = 2,
+            }, zc)
+        end
+        local lb, rb = fld(-132, "gräns", "60"), fld(-70, "radie", "45")
+
+        local zlist = new("ScrollingFrame", {
+            Size = UDim2.new(1, -20, 0, 96), Position = UDim2.new(0, 10, 0, 54),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
+            CanvasSize = UDim2.new(0, 0, 0, 96),
+        }, zc)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
+        }, zlist)
+
+        local function renderZones()
+            for _, ch in ipairs(zlist:GetChildren()) do
+                if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
+            end
+            local n = #state.limits.zones
+            zlist.CanvasSize = UDim2.new(0, 0, 0, math.max(96, n * 27 + 6))
+            if n == 0 then
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+                    Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.dim,
+                    TextXAlignment = Enum.TextXAlignment.Left, Text = "Inga zoner.",
+                }, zlist)
+                return
+            end
+            for i, z in ipairs(state.limits.zones) do
+                local row = new("Frame", {
+                    Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.panel,
+                    BorderSizePixel = 0, LayoutOrder = i,
+                }, zlist)
+                new("TextLabel", {
+                    Size = UDim2.new(1, -34, 1, 0), Position = UDim2.new(0, 6, 0, 0),
+                    BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+                    TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                    Text = string.format("%s · %dst/s", z.name or ("Zon " .. i), z.limit),
+                }, row)
+                local del = new("TextButton", {
+                    Size = UDim2.new(0, 20, 0, 16), Position = UDim2.new(1, -24, 0.5, -8),
+                    BackgroundColor3 = Color3.fromRGB(50, 27, 32), BorderSizePixel = 0,
+                    AutoButtonColor = false, Font = Enum.Font.GothamBold,
+                    TextSize = 10, TextColor3 = C.bad, Text = "x",
+                }, row)
+                del.MouseButton1Click:Connect(function()
+                    table.remove(state.limits.zones, i)
+                    saveConfig()
+                    renderZones()
+                    notify("Zon borttagen", nil)
+                end)
+            end
+        end
+        renderZones()
+
+        track(add.MouseButton1Click:Connect(function()
+            local root = getRoot()
+            if not root then return notify("Ingen karaktär", "bad") end
+            if #state.limits.zones >= MAX_ZONES then return notify("Zon-gräns", "bad") end
+            local rad = math.clamp(tonumber(rb.Text) or 45, 5, 500)
+            local lim = math.clamp(tonumber(lb.Text) or 60, 5, 300)
+            local p = root.Position
+            table.insert(state.limits.zones, {
+                name = "Zon " .. (#state.limits.zones + 1),
+                min = { X = p.X - rad, Y = p.Y - 60, Z = p.Z - rad },
+                max = { X = p.X + rad, Y = p.Y + 200, Z = p.Z + rad },
+                limit = lim,
+            })
+            saveConfig()
+            renderZones()
+            notify("Zon tillagd · " .. lim .. " st/s", "good")
+        end))
+
+        local pc = card(settPage, 80, 3)
+        button(pc, {
+            label = "Spara config", y = 6,
+            onClick = function()
+                if not hasFS then return notify("Inget filsystem", "bad") end
+                saveConfig()
+                notify("Sparad", "good")
+            end,
+        })
+        button(pc, {
+            label = "Återställ allt", y = 42,
+            onClick = function()
+                state = deepCopy(DEFAULTS)
+                saveConfig()
+                notify("Allt återställt", "good")
+                task.delay(0.15, rebuild)
+            end,
+        })
+
+        local dc = card(settPage, 46, 4)
+        button(dc, {
+            label = "Ladda ur", y = 9, danger = true,
+            onClick = function()
+                notify("Laddar ur…", "bad")
+                task.wait(0.3)
+                teardown()
+            end,
+        })
+    end
+
+    local function stageControls()
+        log("10 controls")
+        local min = false
+        local expH = WIN_H
+
+        track(minBtn.MouseButton1Click:Connect(function()
+            min = not min
+            minBtn.Text = min and "+" or "–"
+            if min then
+                expH = win.Size.Y.Offset
+                win.Size = UDim2.new(0, WIN_W, 0, 50)
+                bar.Visible, content.Visible = false, false
+            else
+                bar.Visible, content.Visible = true, true
+                win.Size = UDim2.new(0, WIN_W, 0, expH)
+            end
+        end))
+
+        local hid = false
+        local function setHidden(v)
+            hid = v
+            win.Visible = not v
+            win.Size = UDim2.new(0, WIN_W, 0, v and 0 or (min and 50 or expH))
+        end
+
+        track(closeBtn.MouseButton1Click:Connect(function()
+            setHidden(true)
+            notify("Gömd · " .. state.ui.keybind.Name .. " visar", nil)
+        end))
+        track(UserInputService.InputBegan:Connect(function(i, processed)
+            if processed then return end
+            if i.KeyCode == state.ui.keybind then setHidden(not hid) end
+        end))
+    end
+
+    task.spawn(function()
+        local stages = { stagePlayer, stageVehicle, stageJob, stagePlayers, stageSettings, stageControls }
+        for i, fn in ipairs(stages) do
+            if myGen ~= generation then return end
+            local ok, e = pcall(fn)
+            if not ok then warn("[Venice] steg " .. i .. ": " .. tostring(e)) end
+            task.wait(0.05)
+        end
+        if myGen ~= generation then return end
+
+        log("11 loop")
+        task.wait(0.3)
+
+        track(RunService.Heartbeat:Connect(function(dt)
+            local ok, e = pcall(function()
+                applyPlayer()
+                applyVehicle(dt)
+            end)
+            if not ok then warn("[Venice] loop: " .. tostring(e)) end
+        end))
+
+        task.spawn(function()
+            while gui.Parent do
+                task.wait(math.max(state.job.interval, 0.1))
+                if state.job.enabled then pcall(pizzaStep) end
+            end
+        end)
+
+        track(LP.CharacterAdded:Connect(function()
+            task.wait(0.6)
+            resetAssist()
+        end))
+
+        tabs.Player.MouseButton1Click:Fire()
+        notify("Venice v1.7 · " .. state.ui.keybind.Name .. " visar", "good")
+        log("12 klar")
+    end)
+end
+
+rebuild = function()
+    teardown()
+    task.wait(0.05)
+    local ok, e = pcall(buildGUI)
+    if not ok then
+        warn("[Venice] rebuild: " .. tostring(e))
+        buildFallback(e)
+    end
+end
+
+bindSharedInput()
+local okB, errB = pcall(buildGUI)
+if not okB then
+    warn("[Venice] BYGGE MISSLYCKADES: " .. tostring(errB))
+    buildFallback(errB)
+end
