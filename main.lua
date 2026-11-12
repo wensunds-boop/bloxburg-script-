@@ -1,15 +1,11 @@
+
+```lua
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.7  ·  Bloxburg  ·  lättversion
-  Author: Venice · MIT
-  ---------------------------------------------------------------------
-  v1.7
-    · all klickhantering delar tre globala lyssnare istället för en per reglage
-    · fordonsdetektion: SeatPart, sedan SeatWeld i karaktären, sedan
-      skanning efter VehicleSeat med dig som Occupant
-    · ny Jobb-flik: automatisk pizza via ProximityPrompt/ClickDetector
-  CLIENT-SIDE ONLY. Kicken är lokal. Pizzaläget är nyckelordsdrivet och
-  behöver trimmas mot det som faktiskt står i Bloxburg.
+  Venice Speed Suite  v1.7.1  ·  Bloxburg  ·  Xeno-fix
+  - Kraschfix: Tar bort :Fire() på TextButton, säkrare scanning
+  - Pizza auto-farm: Bättre prompt-firing, optimerad sökning
+  - Xeno-kompatibel: Anpassade executor-funktioner
 =====================================================================]]
 
 local Players          = game:GetService("Players")
@@ -23,19 +19,21 @@ if not PlayerGui then return warn("[Venice] ingen PlayerGui") end
 
 local function log(m) print("[Venice] " .. m) end
 
---=====================================================================
 local CONFIG_FILE = "VeniceSpeedSuite.json"
 local MAX_ZONES   = 40
 
 local DEFAULT_KEYWORDS = {
-    "dough", "sauce", "cheese", "topping", "oven", "bake", "cut", "box", "order",
+    "dough", "sauce", "cheese", "pepperoni", "sausage", "topping",
+    "oven", "bake", "cook", "cut", "slice", "box", "package",
+    "order", "deliver", "supply", "ingredient", "pizza",
+    "knead", "roll", "prepare", "finish", "complete", "submit",
 }
 
 local DEFAULTS = {
     player  = { enabled = false, speed = 34, jumpEnabled = false, jump = 50 },
     vehicle = { enabled = false, maxSpeed = 130, accel = 110, brake = 190, assist = true },
     limits  = { enabled = false, global = 110, zones = {} },
-    job     = { enabled = false, interval = 0.25, radius = 18, keywords = DEFAULT_KEYWORDS },
+    job     = { enabled = false, interval = 0.15, radius = 25, keywords = DEFAULT_KEYWORDS },
     ui      = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
 }
 
@@ -46,7 +44,14 @@ local function deepCopy(t)
 end
 
 local state = deepCopy(DEFAULTS)
-local hasFS = pcall(function() return writefile ~= nil end)
+
+-- Executor-kompatibel filsystem-detektion
+local hasFS = false
+pcall(function()
+    if writefile and readfile and isfile then
+        hasFS = true
+    end
+end)
 
 local function num(v, f, mn, mx)
     if type(v) ~= "number" or v ~= v then return f end
@@ -99,8 +104,8 @@ local function loadConfig()
     local j = d.job
     if type(j) == "table" then
         if type(j.enabled) == "boolean" then state.job.enabled = j.enabled end
-        state.job.interval = num(j.interval, 0.25, 0.1, 3)
-        state.job.radius = num(j.radius, 18, 4, 60)
+        state.job.interval = num(j.interval, 0.15, 0.05, 3)
+        state.job.radius = num(j.radius, 25, 4, 60)
         if type(j.keywords) == "table" then
             local k = {}
             for _, w in ipairs(j.keywords) do
@@ -150,9 +155,11 @@ end
 
 loadConfig()
 
---=====================================================================
 local connections = {}
-local function track(c) table.insert(connections, c); return c end
+local function track(c)
+    if c then table.insert(connections, c) end
+    return c
+end
 
 local generation = 0
 local clearAssistRig
@@ -171,7 +178,9 @@ end
 local function new(class, props, parent)
     local i = Instance.new(class)
     for k, v in pairs(props) do
-        if k ~= "Parent" then i[k] = v end
+        if k ~= "Parent" then
+            pcall(function() i[k] = v end)
+        end
     end
     i.Parent = parent or props.Parent
     return i
@@ -220,9 +229,7 @@ local function buildFallback(err)
     end)
 end
 
---=====================================================================
 -- delad inmatning
---=====================================================================
 local inputState = { drag = false, off = nil, slider = nil }
 
 local function bindSharedInput()
@@ -253,7 +260,6 @@ local function bindSharedInput()
     end))
 end
 
---=====================================================================
 local WIN_W, WIN_H = 420, 500
 local CANVAS = 760
 
@@ -290,7 +296,7 @@ local function buildGUI()
     new("TextLabel", {
         Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 24),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "v1.7",
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "v1.7.1 Xeno",
     }, header)
 
     local status = new("TextLabel", {
@@ -300,12 +306,14 @@ local function buildGUI()
     }, header)
 
     local function notify(text, kind)
-        if not status.Parent then return end
+        if not status or not status.Parent then return end
         local s = tostring(text)
         status.Text = s
         status.TextColor3 = kind == "bad" and C.bad or kind == "good" and C.good or C.text
         task.delay(3, function()
-            if status.Parent and status.Text == s then status.Text = "" end
+            pcall(function()
+                if status.Parent and status.Text == s then status.Text = "" end
+            end)
         end)
     end
 
@@ -346,6 +354,18 @@ local function buildGUI()
     }, win)
 
     local pages, tabs = {}, {}
+    local activeTab = nil
+
+    local function selectTab(name)
+        activeTab = name
+        for o, pg in pairs(pages) do
+            pg.Visible = (o == name)
+            pcall(function()
+                tabs[o].BackgroundColor3 = o == name and C.card or C.panel
+                tabs[o].TextColor3 = o == name and C.text or C.dim
+            end)
+        end
+    end
 
     local function tab(name, order, short)
         local b = new("TextButton", {
@@ -369,13 +389,7 @@ local function buildGUI()
 
         pages[name], tabs[name] = p, b
         track(b.MouseButton1Click:Connect(function()
-            for o, pg in pairs(pages) do
-                pg.Visible = (o == name)
-                pcall(function()
-                    tabs[o].BackgroundColor3 = o == name and C.card or C.panel
-                    tabs[o].TextColor3 = o == name and C.text or C.dim
-                end)
-            end
+            selectTab(name)
         end))
         return p
     end
@@ -386,7 +400,7 @@ local function buildGUI()
     local playersPage = tab("Players", 4)
     local settPage    = tab("Settings", 5)
 
-    -- widgets -------------------------------------------------------
+    -- widgets
     local function card(parent, h, order)
         local f = new("Frame", {
             Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.card,
@@ -532,7 +546,7 @@ local function buildGUI()
         return b
     end
 
-    -- motor ---------------------------------------------------------
+    -- motor
     local jumpForced = false
     local rig = { part = nil, att = nil, force = nil }
     local assist = {
@@ -584,7 +598,7 @@ local function buildGUI()
             jumpForced = false
         end
         local u = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.playerReadout
-        if u then u(hum.WalkSpeed, lim) end
+        if u then pcall(u, hum.WalkSpeed, lim) end
     end
 
     local function seatFromWeld(hum)
@@ -592,8 +606,8 @@ local function buildGUI()
         if not char then return nil end
         for _, d in ipairs(char:GetDescendants()) do
             if d:IsA("Weld") or d:IsA("WeldConstraint") then
-                local other = d.Part1
-                if other and (other:IsA("Seat") or other:IsA("VehicleSeat")) then
+                local ok, other = pcall(function() return d.Part1 end)
+                if ok and other and (other:IsA("Seat") or other:IsA("VehicleSeat")) then
                     return other
                 end
             end
@@ -615,7 +629,8 @@ local function buildGUI()
         local hum = getHumanoid()
         if not hum then return nil end
 
-        local seat = hum.SeatPart
+        local seat = nil
+        pcall(function() seat = hum.SeatPart end)
         if not seat then seat = seatFromWeld(hum) end
         if not seat and hum.Sit and os.clock() - assist.lastScan > 0.5 then
             assist.lastScan = os.clock()
@@ -651,10 +666,11 @@ local function buildGUI()
                 if s > bs then best, bs = d, s end
             end
         end
-        return best or model.PrimaryPart or ar
+        return best or model.PrimaryPart or (okR and ar) or nil
     end
 
     local function ensureRig(part)
+        if not part then return false end
         if rig.part == part and rig.force and rig.force.Parent then return true end
         clearAssistRig()
         local ok = pcall(function()
@@ -691,7 +707,7 @@ local function buildGUI()
 
         if not model then
             if assist.lastSeat ~= nil then resetAssist() end
-            if u then u(nil, 0) end
+            if u then pcall(u, nil, 0) end
             return
         end
 
@@ -707,7 +723,7 @@ local function buildGUI()
             assist.anchored = assist.primary ~= nil and assist.primary.Anchored
             if assist.anchored and os.clock() - assist.lastNote > 3 then
                 assist.lastNote = os.clock()
-                notify("Bilen är anchrad — fart går ej att ändra", "bad")
+                notify("Bilen ar anchrad - fart gar ej att andra", "bad")
             end
         end
 
@@ -726,11 +742,11 @@ local function buildGUI()
         end
         local speed = vel.Magnitude
         local method = assist.anchored and "anchrad" or (assist.direct and "direkt" or "constraint")
-        local info = string.format("metod: %s · %d säten", method, #assist.seats)
+        local info = string.format("metod: %s | %d saten", method, #assist.seats)
 
         if not state.vehicle.enabled then
             if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-            if u then u(model.Name, speed, nil, info) end
+            if u then pcall(u, model.Name, speed, nil, info) end
             return
         end
 
@@ -749,7 +765,7 @@ local function buildGUI()
 
         if not state.vehicle.assist or not primary or assist.anchored then
             if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-            if u then u(model.Name, speed, nil, info) end
+            if u then pcall(u, model.Name, speed, nil, info) end
             return
         end
 
@@ -765,7 +781,7 @@ local function buildGUI()
 
         local okF, fwd = pcall(function() return primary.CFrame.LookVector end)
         if not okF or typeof(fwd) ~= "Vector3" then
-            if u then u(model.Name, speed, nil, info) end
+            if u then pcall(u, model.Name, speed, nil, info) end
             return
         end
 
@@ -789,7 +805,7 @@ local function buildGUI()
                 if assist.probe > 1 then
                     if math.abs(fs - assist.probeFrom) < 2 then
                         assist.direct = true
-                        notify("Assist: ingen effekt — byter metod", "bad")
+                        notify("Assist: ingen effekt - byter metod", "bad")
                     end
                     assist.probe = 0
                 end
@@ -810,76 +826,223 @@ local function buildGUI()
             end
         end
 
-        if u then u(model.Name, speed, assist.mode, info) end
+        if u then pcall(u, model.Name, speed, assist.mode, info) end
     end
 
-    -- pizza ---------------------------------------------------------
-    local function firePrompt(p)
+    --================================================================
+    -- PIZZA AUTO-FARM - Komplett omskriven för Bloxburg
+    --================================================================
+
+    -- Säker prompt-firing kompatibel med Xeno och andra executors
+    local function firePromptSafe(prompt)
+        -- Metod 1: fireproximityprompt (mest executor har denna)
         if type(fireproximityprompt) == "function" then
-            local ok = pcall(fireproximityprompt, p)
+            local ok = pcall(fireproximityprompt, prompt)
             if ok then return true end
         end
-        return (pcall(function()
-            p:InputHoldBegin()
-            task.delay(math.max(p.HoldDuration, 0.05), function()
-                pcall(function() p:InputHoldEnd() end)
-            end)
-        end))
-    end
 
-    local function fireClick(cd)
-        if type(fireclickdetector) == "function" then
-            return (pcall(fireclickdetector, cd))
+        -- Metod 2: Xeno-specifik
+        if type(getgenv) == "function" then
+            local env = getgenv()
+            if env and type(env.fireproximityprompt) == "function" then
+                local ok = pcall(env.fireproximityprompt, prompt)
+                if ok then return true end
+            end
         end
+
+        -- Metod 3: Simulera hold
+        local ok = pcall(function()
+            prompt:InputHoldBegin()
+            local holdTime = math.max(prompt.HoldDuration, 0.05)
+            task.delay(holdTime + 0.05, function()
+                pcall(function() prompt:InputHoldEnd() end)
+            end)
+        end)
+        if ok then return true end
+
+        -- Metod 4: Direkt triggering
+        pcall(function()
+            prompt.Enabled = true
+            prompt:InputHoldBegin()
+            task.wait(math.max(prompt.HoldDuration, 0.1) + 0.05)
+            prompt:InputHoldEnd()
+        end)
+
         return false
     end
 
-    local function scanNearby(radius)
-        local root = getRoot()
-        if not root then return {} end
-        local params = OverlapParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { LP.Character }
+    local function fireClickSafe(cd)
+        if type(fireclickdetector) == "function" then
+            local ok = pcall(fireclickdetector, cd)
+            if ok then return true end
+        end
 
-        local ok, parts = pcall(function()
-            return workspace:GetPartBoundsInRadius(root.Position, radius, params)
-        end)
-        if not ok or not parts then return {} end
-
-        local found = {}
-        for _, part in ipairs(parts) do
-            for _, ch in ipairs(part:GetChildren()) do
-                if ch:IsA("ProximityPrompt") and ch.Enabled then
-                    table.insert(found, {
-                        prompt = ch,
-                        text = (ch.ActionText .. " " .. ch.ObjectText .. " " .. part.Name):lower(),
-                    })
-                elseif ch:IsA("ClickDetector") then
-                    table.insert(found, { click = ch, text = part.Name:lower() })
-                end
+        -- Xeno-specifik
+        if type(getgenv) == "function" then
+            local env = getgenv()
+            if env and type(env.fireclickdetector) == "function" then
+                local ok = pcall(env.fireclickdetector, cd)
+                if ok then return true end
             end
         end
+
+        -- Simulera click
+        pcall(function()
+            local part = cd.Parent
+            if part and part:IsA("BasePart") then
+                -- Försök trigga genom att anropa
+                local clickConn = cd:FindFirstChild("ClickDetector")
+                if clickConn then
+                    fireclickdetector(cd, 0)
+                end
+            end
+        end)
+
+        return false
+    end
+
+    -- Samla alla interaktionsbara objekt nära spelaren
+    local function collectNearbyInteractables(radius)
+        local root = getRoot()
+        if not root then return {} end
+        local rootPos = root.Position
+        local found = {}
+        local count = 0
+        local maxScan = 2000 -- Begränsa antal skannade objekt
+
+        -- Säker scanning utan GetPartBoundsInRadius (som kan krascha)
+        local ok = pcall(function()
+            for _, desc in ipairs(workspace:GetDescendants()) do
+                count += 1
+                if count > maxScan then break end -- Förhindra lag/krasch
+
+                if desc:IsA("ProximityPrompt") and desc.Enabled then
+                    local par = desc.Parent
+                    if par and par:IsA("BasePart") then
+                        local dist = (par.Position - rootPos).Magnitude
+                        if dist <= radius then
+                            local actionText = ""
+                            pcall(function() actionText = desc.ActionText or "" end)
+                            local objectText = ""
+                            pcall(function() objectText = desc.ObjectText or "" end)
+                            local combined = (actionText .. " " .. objectText .. " " .. par.Name):lower()
+                            table.insert(found, {
+                                type = "prompt",
+                                instance = desc,
+                                text = combined,
+                                distance = dist,
+                                parent = par,
+                            })
+                        end
+                    end
+                elseif desc:IsA("ClickDetector") then
+                    local par = desc.Parent
+                    if par and par:IsA("BasePart") then
+                        local dist = (par.Position - rootPos).Magnitude
+                        if dist <= radius then
+                            table.insert(found, {
+                                type = "click",
+                                instance = desc,
+                                text = par.Name:lower(),
+                                distance = dist,
+                                parent = par,
+                            })
+                        end
+                    end
+                end
+            end
+        end)
+
+        -- Sortera efter avstånd (närmast först)
+        table.sort(found, function(a, b) return a.distance < b.distance end)
         return found
     end
 
+    -- Pizza-baknings steg-logik
+    local pizzaState = {
+        lastAction = 0,
+        actionCount = 0,
+        lastKeyword = "",
+        cooldowns = {}, -- Per-prompt cooldown
+    }
+
     local function pizzaStep()
         if not state.job.enabled then return end
-        local found = scanNearby(state.job.radius)
+
+        local now = os.clock()
+
+        -- Samla interaktionsbara objekt
+        local found = collectNearbyInteractables(state.job.radius)
         if #found == 0 then return end
 
+        -- Gå igenom nyckelord i prioritetsordning
         for _, kw in ipairs(state.job.keywords) do
             for _, cand in ipairs(found) do
                 if cand.text:find(kw, 1, true) then
-                    local ok = cand.prompt and firePrompt(cand.prompt) or fireClick(cand.click)
-                    local j = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
-                    if j then j(ok and ("Tryckte: " .. kw) or ("Misslyckades: " .. kw), ok) end
-                    return
+                    -- Kolla cooldown per instance
+                    local id = tostring(cand.instance)
+                    local cd = pizzaState.cooldowns[id]
+                    if cd and now - cd < 0.3 then
+                        -- Fortfarande i cooldown, skippa
+                        continue
+                    end
+
+                    local ok = false
+                    if cand.type == "prompt" then
+                        ok = firePromptSafe(cand.instance)
+                    elseif cand.type == "click" then
+                        ok = fireClickSafe(cand.instance)
+                    end
+
+                    if ok then
+                        pizzaState.cooldowns[id] = now
+                        pizzaState.lastAction = now
+                        pizzaState.actionCount += 1
+                        pizzaState.lastKeyword = kw
+
+                        local j = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
+                        if j then
+                            pcall(j, string.format("Tryckte: %s (#%d) %.1fm bort",
+                                kw, pizzaState.actionCount, cand.distance), true)
+                        end
+                    else
+                        local j = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
+                        if j then pcall(j, "Miss: " .. kw, false) end
+                    end
+
+                    return -- En aktion per cykel
                 end
             end
         end
+
+        -- Om inget nyckelord matchade, tryck närmaste prompt ändå
+        -- (Bloxburg har ibland generiska prompts)
+        if #found > 0 and found[1].type == "prompt" then
+            local cand = found[1]
+            local id = tostring(cand.instance)
+            local cd = pizzaState.cooldowns[id]
+            if not cd or now - cd >= 0.5 then
+                local ok = firePromptSafe(cand.instance)
+                if ok then
+                    pizzaState.cooldowns[id] = now
+                    pizzaState.actionCount += 1
+                    local j = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
+                    if j then pcall(j, "Auto: " .. cand.text:sub(1, 30), true) end
+                end
+            end
+        end
+
+        -- Rensa gamla cooldowns var 10:e sekund
+        if pizzaState.actionCount % 30 == 0 then
+            local fresh = {}
+            for k, v in pairs(pizzaState.cooldowns) do
+                if now - v < 5 then fresh[k] = v end
+            end
+            pizzaState.cooldowns = fresh
+        end
     end
 
-    -- steg ----------------------------------------------------------
+    -- steg
     local speedSlider
 
     local function stagePlayer()
@@ -891,18 +1054,18 @@ local function buildGUI()
             onChanged = function(v)
                 state.player.enabled = v
                 saveConfig()
-                notify(v and "Spelarjustering på" or "Spelarjustering av", v and "good" or nil)
+                notify(v and "Spelarjustering pa" or "Spelarjustering av", v and "good" or nil)
             end,
         })
         speedSlider = slider(c, {
-            label = "Gånghastighet", min = 16, max = 300, step = 1,
+            label = "Ganghastighet", min = 16, max = 300, step = 1,
             value = state.player.speed, y = 54,
             format = function(x) return x .. " st/s" end,
             onChanged = function(x) state.player.speed = x; saveConfig() end,
         })
 
-        local live = label(playerPage, "16.0 st/s", 8, 13, C.text)
-        live.Parent.LayoutOrder = 2
+        local liveCard = card(playerPage, 32, 2)
+        local live = label(liveCard, "16.0 st/s", 8, 13, C.text)
 
         local jc = card(playerPage, 92, 3)
         label(jc, "HOPP", 8)
@@ -918,7 +1081,7 @@ local function buildGUI()
 
         local rc = card(playerPage, 48, 4)
         button(rc, {
-            label = "Återställ (16 / 50)", y = 10,
+            label = "Aterstall (16 / 50)", y = 10,
             onClick = function()
                 state.player.speed, state.player.jump = 16, 50
                 speedSlider.set(16)
@@ -929,13 +1092,15 @@ local function buildGUI()
                     hum.UseJumpPower = true
                     hum.JumpPower = 50
                 end) end
-                notify("Återställt", "good")
+                notify("Aterstellt", "good")
             end,
         })
 
         _G.__VeniceSpeedSuite.playerReadout = function(cur, lim)
-            live.Text = string.format("%.1f st/s%s", cur, lim and ("  ·  ZONGRÄNS " .. lim) or "")
-            live.TextColor3 = lim and C.warn or C.text
+            pcall(function()
+                live.Text = string.format("%.1f st/s%s", cur, lim and ("  |  ZONGRANS " .. lim) or "")
+                live.TextColor3 = lim and C.warn or C.text
+            end)
         end
     end
 
@@ -945,9 +1110,9 @@ local function buildGUI()
         log("6 vehicle")
         local d = card(vehiclePage, 78, 1)
         label(d, "FORDON", 8)
-        detLabel = label(d, "Inte i säte", 24, 12, C.dim)
+        detLabel = label(d, "Inte i sate", 24, 12, C.dim)
         spdLabel = label(d, "0.0 st/s", 42, 10, C.dim)
-        infoLabel = label(d, "metod: —", 56, 9, C.dim)
+        infoLabel = label(d, "metod: -", 56, 9, C.dim)
 
         local c = card(vehiclePage, 140, 2)
         toggle(c, {
@@ -955,7 +1120,7 @@ local function buildGUI()
             onChanged = function(v)
                 state.vehicle.enabled = v
                 saveConfig()
-                notify(v and "Fordonsjustering på" or "Fordonsjustering av", v and "good" or nil)
+                notify(v and "Fordonsjustering pa" or "Fordonsjustering av", v and "good" or nil)
             end,
         })
         slider(c, {
@@ -967,7 +1132,7 @@ local function buildGUI()
         slider(c, {
             label = "Acceleration", min = 20, max = 600, step = 5,
             value = state.vehicle.accel, y = 78,
-            format = function(x) return x .. " st/s²" end,
+            format = function(x) return x .. " st/s2" end,
             onChanged = function(x) state.vehicle.accel = x; saveConfig() end,
         })
 
@@ -975,7 +1140,7 @@ local function buildGUI()
         slider(bc, {
             label = "Bromskraft", min = 40, max = 900, step = 10,
             value = state.vehicle.brake, y = 8,
-            format = function(x) return x .. " st/s²" end,
+            format = function(x) return x .. " st/s2" end,
             onChanged = function(x) state.vehicle.brake = x; saveConfig() end,
         })
         toggle(bc, {
@@ -983,13 +1148,13 @@ local function buildGUI()
             onChanged = function(v)
                 state.vehicle.assist = v
                 saveConfig()
-                notify(v and "Assist på" or "Assist av", nil)
+                notify(v and "Assist pa" or "Assist av", nil)
             end,
         })
 
         local rc = card(vehiclePage, 48, 4)
         button(rc, {
-            label = "Återställ fordon", y = 10,
+            label = "Aterstall fordon", y = 10,
             onClick = function()
                 state.vehicle.maxSpeed, state.vehicle.accel, state.vehicle.brake = 130, 110, 190
                 saveConfig()
@@ -998,53 +1163,62 @@ local function buildGUI()
         })
 
         _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, _, info)
-            detLabel.Text = name and ("I: " .. name) or "Inte i säte"
-            detLabel.TextColor3 = name and C.good or C.dim
-            spdLabel.Text = string.format("%.1f st/s", speed)
-            spdLabel.TextColor3 = speed > 0.5 and C.text or C.dim
-            infoLabel.Text = info or "metod: —"
-            infoLabel.TextColor3 = (info and info:find("anchrad")) and C.bad or C.dim
+            pcall(function()
+                detLabel.Text = name and ("I: " .. name) or "Inte i sate"
+                detLabel.TextColor3 = name and C.good or C.dim
+                spdLabel.Text = string.format("%.1f st/s", speed or 0)
+                spdLabel.TextColor3 = (speed or 0) > 0.5 and C.text or C.dim
+                infoLabel.Text = info or "metod: -"
+                infoLabel.TextColor3 = (info and info:find("anchrad")) and C.bad or C.dim
+            end)
         end
     end
 
     local function stageJob()
         log("7 job")
-        local c = card(jobPage, 108, 1)
-        label(c, "PIZZABAK", 8)
+        local c = card(jobPage, 130, 1)
+        label(c, "PIZZA AUTO-FARM", 8)
         toggle(c, {
             label = "Baka automatiskt", y = 24, value = state.job.enabled,
             onChanged = function(v)
                 state.job.enabled = v
+                pizzaState.actionCount = 0
                 saveConfig()
-                notify(v and "Auto-pizza på" or "Auto-pizza av", v and "good" or nil)
+                notify(v and "Auto-pizza PA - sta vid stationen!" or "Auto-pizza av", v and "good" or nil)
             end,
         })
         slider(c, {
-            label = "Intervall", min = 0.1, max = 3, step = 0.05,
+            label = "Intervall (lagre = snabbare)", min = 0.05, max = 2, step = 0.05,
             value = state.job.interval, y = 54,
             format = function(x) return string.format("%.2f s", x) end,
             onChanged = function(x) state.job.interval = x; saveConfig() end,
         })
-
-        local rc = card(jobPage, 92, 2)
-        slider(rc, {
-            label = "Sökradie", min = 4, max = 60, step = 1,
-            value = state.job.radius, y = 8,
+        slider(c, {
+            label = "Sokradie", min = 4, max = 60, step = 1,
+            value = state.job.radius, y = 94,
             format = function(x) return x .. " st" end,
             onChanged = function(x) state.job.radius = x; saveConfig() end,
         })
-        local jr = label(rc, "redo", 52, 9, C.dim)
+
+        local sc = card(jobPage, 64, 2)
+        label(sc, "STATUS", 8)
+        local jr = label(sc, "Redo - sla pa och sta vid pizza-stationen", 24, 9, C.dim)
+        local jcount = label(sc, "Aktioner: 0", 40, 9, C.dim)
+
         _G.__VeniceSpeedSuite.jobReadout = function(txt, ok)
-            jr.Text = txt
-            jr.TextColor3 = ok and C.good or C.bad
+            pcall(function()
+                jr.Text = txt or ""
+                jr.TextColor3 = ok and C.good or C.bad
+                jcount.Text = "Aktioner: " .. pizzaState.actionCount
+            end)
         end
 
-        local kc = card(jobPage, 96, 3)
+        local kc = card(jobPage, 110, 3)
         label(kc, "NYCKELORD (ordning = prioritet)", 8)
         local kb = new("TextBox", {
-            Size = UDim2.new(1, -20, 0, 52), Position = UDim2.new(0, 10, 0, 24),
+            Size = UDim2.new(1, -20, 0, 64), Position = UDim2.new(0, 10, 0, 24),
             BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
-            TextSize = 10, TextColor3 = C.text, TextWrapped = true,
+            TextSize = 9, TextColor3 = C.text, TextWrapped = true,
             ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
         }, kc)
         new("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
@@ -1057,36 +1231,52 @@ local function buildGUI()
             if #out > 0 then
                 state.job.keywords = out
                 saveConfig()
+                notify(#out .. " nyckelord sparade", "good")
             end
         end
         track(kb.FocusLost:Connect(parseKeywords))
 
-        local sc = card(jobPage, 48, 4)
-        button(sc, {
-            label = "Skanna nu", y = 10,
+        local bc = card(jobPage, 80, 4)
+        button(bc, {
+            label = "Skanna nu (test)", y = 6,
             onClick = function()
-                local found = scanNearby(state.job.radius)
-                notify(string.format("%d träffar inom %d st", #found, state.job.radius),
+                local found = collectNearbyInteractables(state.job.radius)
+                notify(string.format("%d interaktioner inom %d st", #found, state.job.radius),
                     #found > 0 and "good" or "bad")
                 if #found > 0 then
                     local names = {}
-                    for i = 1, math.min(3, #found) do
-                        table.insert(names, found[i].text:sub(1, 22))
+                    for i = 1, math.min(5, #found) do
+                        table.insert(names, string.format("[%.0fm] %s",
+                            found[i].distance, found[i].text:sub(1, 25)))
                     end
-                    jr.Text = table.concat(names, " | ")
+                    jr.Text = table.concat(names, "\n")
                     jr.TextColor3 = C.text
+                    jr.Size = UDim2.new(1, -20, 0, #names * 12)
+                else
+                    jr.Text = "Inga prompts hittade - ga narmare stationen"
+                    jr.TextColor3 = C.bad
                 end
             end,
         })
+        button(bc, {
+            label = "Nollstall raknare", y = 40,
+            onClick = function()
+                pizzaState.actionCount = 0
+                pizzaState.cooldowns = {}
+                notify("Raknare nollstalld", "good")
+            end,
+        })
 
-        local nc = card(jobPage, 74, 5)
+        local nc = card(jobPage, 90, 5)
         new("TextLabel", {
             Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Trycker ProximityPrompt och ClickDetector i den ordning nyckelorden "
-                .. "står. Står du still vid stationen går kedjan deg → sås → ost → ugn "
-                .. "→ skär → låda. Ordna om eller lägg till egna ord om något missas.",
+            Text = "GUIDE: 1) Ta pizza-jobbet i Bloxburg  2) Ga till stationen  "
+                .. "3) Sla pa 'Baka automatiskt'  4) Scriptet trycker prompts "
+                .. "automatiskt i ordningen: deg > sas > ost > ugn > skar > lada. "
+                .. "Sank intervallet for snabbare bakning. "
+                .. "Anvand 'Skanna nu' for att se vad som finns nara dig.",
         }, nc)
     end
 
@@ -1096,7 +1286,7 @@ local function buildGUI()
         log("8 players")
         local c = card(playersPage, 140, 1)
         label(c, "SERVER", 8)
-        local count = label(c, "—", 22, 10, C.dim)
+        local count = label(c, "-", 22, 10, C.dim)
 
         local function sb(text, x, w, fn, danger)
             local b = new("TextButton", {
@@ -1105,7 +1295,7 @@ local function buildGUI()
                 BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.Gotham,
                 TextSize = 9, TextColor3 = danger and C.bad or C.text, Text = text,
             }, c)
-            b.MouseButton1Click:Connect(function() pcall(fn) end)
+            track(b.MouseButton1Click:Connect(function() pcall(fn) end))
             return b
         end
 
@@ -1130,7 +1320,7 @@ local function buildGUI()
             end
             if n == 0 then return notify("Ingen markerad", "bad") end
             notify("Kick skickat till " .. n, "good")
-            task.delay(1.6, refreshPlayers)
+            task.delay(1.6, function() pcall(refreshPlayers) end)
         end, true)
 
         sb("Kick alla andra", 10, 140, function()
@@ -1143,7 +1333,7 @@ local function buildGUI()
             end
             notify(n > 0 and ("Kick skickat till " .. n) or "Ingen att kicka",
                 n > 0 and "good" or "bad")
-            task.delay(1.6, refreshPlayers)
+            task.delay(1.6, function() pcall(refreshPlayers) end)
         end)
 
         local lc = card(playersPage, 200, 2)
@@ -1181,10 +1371,10 @@ local function buildGUI()
                         Font = Enum.Font.GothamBold, TextSize = 9,
                         TextColor3 = Color3.new(1, 1, 1), Text = on and "x" or "",
                     }, row)
-                    cb.MouseButton1Click:Connect(function()
+                    track(cb.MouseButton1Click:Connect(function()
                         selected[p.UserId] = (not selected[p.UserId]) or nil
                         refreshPlayers()
-                    end)
+                    end))
 
                     new("TextLabel", {
                         Size = UDim2.new(1, -86, 1, 0), Position = UDim2.new(0, 24, 0, 0),
@@ -1199,11 +1389,11 @@ local function buildGUI()
                         AutoButtonColor = false, Font = Enum.Font.GothamBold,
                         TextSize = 8, TextColor3 = C.bad, Text = "kick",
                     }, row)
-                    kbb.MouseButton1Click:Connect(function()
+                    track(kbb.MouseButton1Click:Connect(function()
                         pcall(function() p:Kick("Kickad av Venice") end)
                         notify("Kick skickat till " .. p.Name, "good")
-                        task.delay(1.6, refreshPlayers)
-                    end)
+                        task.delay(1.6, function() pcall(refreshPlayers) end)
+                    end))
                 end
             end
 
@@ -1218,30 +1408,34 @@ local function buildGUI()
         end
         refreshPlayers()
 
-        track(Players.PlayerAdded:Connect(function() task.delay(0.5, refreshPlayers) end))
-        track(Players.PlayerRemoving:Connect(function() task.delay(0.5, refreshPlayers) end))
-        track(tabs.Players.MouseButton1Click:Connect(refreshPlayers))
+        track(Players.PlayerAdded:Connect(function() task.delay(0.5, function() pcall(refreshPlayers) end) end))
+        track(Players.PlayerRemoving:Connect(function() task.delay(0.5, function() pcall(refreshPlayers) end) end))
+        track(tabs.Players.MouseButton1Click:Connect(function() pcall(refreshPlayers) end))
 
-        local note = label(playersPage, "Kick är lokalt — servern kan lägga tillbaka dem.", 0, 9, C.dim)
-        note.LayoutOrder = 3
-        note.TextWrapped = true
-        note.Size = UDim2.new(1, 0, 0, 24)
+        local noteCard = card(playersPage, 36, 3)
+        new("TextLabel", {
+            Size = UDim2.new(1, -20, 1, -8), Position = UDim2.new(0, 10, 0, 4),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+            TextColor3 = C.dim, TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "Kick ar lokalt - servern kan lagga tillbaka dem.",
+        }, noteCard)
     end
 
     local function stageSettings()
         log("9 settings")
         local c = card(settPage, 100, 1)
-        label(c, "FARTSGRÄNSER", 8)
+        label(c, "FARTSGRANSER", 8)
         toggle(c, {
-            label = "Tillämpa gränser", y = 22, value = state.limits.enabled,
+            label = "Tillampa granser", y = 22, value = state.limits.enabled,
             onChanged = function(v)
                 state.limits.enabled = v
                 saveConfig()
-                notify(v and "Gränser på" or "Gränser av", nil)
+                notify(v and "Granser pa" or "Granser av", nil)
             end,
         })
         slider(c, {
-            label = "Standardgräns", min = 16, max = 300, step = 1,
+            label = "Standardgrans", min = 16, max = 300, step = 1,
             value = state.limits.global, y = 52,
             format = function(x) return x .. " st/s" end,
             onChanged = function(x) state.limits.global = x; saveConfig() end,
@@ -1254,7 +1448,7 @@ local function buildGUI()
             Size = UDim2.new(1, -150, 0, 24), Position = UDim2.new(0, 10, 0, 22),
             BackgroundColor3 = C.track, BorderSizePixel = 0, AutoButtonColor = false,
             Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.text,
-            TextXAlignment = Enum.TextXAlignment.Left, Text = "  Lägg zon här",
+            TextXAlignment = Enum.TextXAlignment.Left, Text = "  Lagg zon har",
         }, zc)
 
         local function fld(x, ph, txt)
@@ -1265,7 +1459,7 @@ local function buildGUI()
                 ClearTextOnFocus = false, ZIndex = 2,
             }, zc)
         end
-        local lb, rb = fld(-132, "gräns", "60"), fld(-70, "radie", "45")
+        local lb, rb = fld(-132, "grans", "60"), fld(-70, "radie", "45")
 
         local zlist = new("ScrollingFrame", {
             Size = UDim2.new(1, -20, 0, 96), Position = UDim2.new(0, 10, 0, 54),
@@ -1301,7 +1495,7 @@ local function buildGUI()
                     BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
                     TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
                     TextTruncate = Enum.TextTruncate.AtEnd,
-                    Text = string.format("%s · %dst/s", z.name or ("Zon " .. i), z.limit),
+                    Text = string.format("%s | %dst/s", z.name or ("Zon " .. i), z.limit),
                 }, row)
                 local del = new("TextButton", {
                     Size = UDim2.new(0, 20, 0, 16), Position = UDim2.new(1, -24, 0.5, -8),
@@ -1309,20 +1503,20 @@ local function buildGUI()
                     AutoButtonColor = false, Font = Enum.Font.GothamBold,
                     TextSize = 10, TextColor3 = C.bad, Text = "x",
                 }, row)
-                del.MouseButton1Click:Connect(function()
+                track(del.MouseButton1Click:Connect(function()
                     table.remove(state.limits.zones, i)
                     saveConfig()
                     renderZones()
                     notify("Zon borttagen", nil)
-                end)
+                end))
             end
         end
         renderZones()
 
         track(add.MouseButton1Click:Connect(function()
             local root = getRoot()
-            if not root then return notify("Ingen karaktär", "bad") end
-            if #state.limits.zones >= MAX_ZONES then return notify("Zon-gräns", "bad") end
+            if not root then return notify("Ingen karaktar", "bad") end
+            if #state.limits.zones >= MAX_ZONES then return notify("Zon-grans", "bad") end
             local rad = math.clamp(tonumber(rb.Text) or 45, 5, 500)
             local lim = math.clamp(tonumber(lb.Text) or 60, 5, 300)
             local p = root.Position
@@ -1334,7 +1528,7 @@ local function buildGUI()
             })
             saveConfig()
             renderZones()
-            notify("Zon tillagd · " .. lim .. " st/s", "good")
+            notify("Zon tillagd | " .. lim .. " st/s", "good")
         end))
 
         local pc = card(settPage, 80, 3)
@@ -1347,11 +1541,11 @@ local function buildGUI()
             end,
         })
         button(pc, {
-            label = "Återställ allt", y = 42,
+            label = "Aterstall allt", y = 42,
             onClick = function()
                 state = deepCopy(DEFAULTS)
                 saveConfig()
-                notify("Allt återställt", "good")
+                notify("Allt aterstellt", "good")
                 task.delay(0.15, rebuild)
             end,
         })
@@ -1360,7 +1554,7 @@ local function buildGUI()
         button(dc, {
             label = "Ladda ur", y = 9, danger = true,
             onClick = function()
-                notify("Laddar ur…", "bad")
+                notify("Laddar ur...", "bad")
                 task.wait(0.3)
                 teardown()
             end,
@@ -1374,7 +1568,7 @@ local function buildGUI()
 
         track(minBtn.MouseButton1Click:Connect(function()
             min = not min
-            minBtn.Text = min and "+" or "–"
+            minBtn.Text = min and "+" or "-"
             if min then
                 expH = win.Size.Y.Offset
                 win.Size = UDim2.new(0, WIN_W, 0, 50)
@@ -1389,12 +1583,11 @@ local function buildGUI()
         local function setHidden(v)
             hid = v
             win.Visible = not v
-            win.Size = UDim2.new(0, WIN_W, 0, v and 0 or (min and 50 or expH))
         end
 
         track(closeBtn.MouseButton1Click:Connect(function()
             setHidden(true)
-            notify("Gömd · " .. state.ui.keybind.Name .. " visar", nil)
+            notify("Gomd | " .. state.ui.keybind.Name .. " visar", nil)
         end))
         track(UserInputService.InputBegan:Connect(function(i, processed)
             if processed then return end
@@ -1402,48 +1595,78 @@ local function buildGUI()
         end))
     end
 
+    -- Bygg alla steg med säkerhet och pauser
     task.spawn(function()
         local stages = { stagePlayer, stageVehicle, stageJob, stagePlayers, stageSettings, stageControls }
         for i, fn in ipairs(stages) do
             if myGen ~= generation then return end
             local ok, e = pcall(fn)
             if not ok then warn("[Venice] steg " .. i .. ": " .. tostring(e)) end
-            task.wait(0.05)
+            task.wait(0.08) -- Lite mer tid mellan steg för stabilitet
         end
         if myGen ~= generation then return end
 
         log("11 loop")
         task.wait(0.3)
 
+        -- Huvudloop med felfångning och throttling
+        local lastError = 0
+        local errorCount = 0
+
         track(RunService.Heartbeat:Connect(function(dt)
+            if myGen ~= generation then return end
             local ok, e = pcall(function()
                 applyPlayer()
                 applyVehicle(dt)
             end)
-            if not ok then warn("[Venice] loop: " .. tostring(e)) end
+            if not ok then
+                local now = os.clock()
+                if now - lastError > 5 then
+                    errorCount = 0
+                end
+                errorCount += 1
+                lastError = now
+                if errorCount <= 3 then
+                    warn("[Venice] loop: " .. tostring(e))
+                end
+            end
         end))
 
+        -- Pizza auto-farm loop - separat med egen timing
         task.spawn(function()
-            while gui.Parent do
-                task.wait(math.max(state.job.interval, 0.1))
-                if state.job.enabled then pcall(pizzaStep) end
+            while gui and gui.Parent do
+                local interval = math.max(state.job.interval, 0.05)
+                task.wait(interval)
+
+                if myGen ~= generation then break end
+
+                if state.job.enabled then
+                    local ok, e = pcall(pizzaStep)
+                    if not ok then
+                        warn("[Venice] pizza: " .. tostring(e))
+                        task.wait(1) -- Vänta extra vid fel
+                    end
+                end
             end
         end)
 
         track(LP.CharacterAdded:Connect(function()
             task.wait(0.6)
             resetAssist()
+            pizzaState.cooldowns = {}
         end))
 
-        tabs.Player.MouseButton1Click:Fire()
-        notify("Venice v1.7 · " .. state.ui.keybind.Name .. " visar", "good")
+        -- FIX: Använd selectTab istället för :Fire() som inte finns på TextButton
+        selectTab("Player")
+
+        notify("Venice v1.7.1 | " .. state.ui.keybind.Name .. " visar/gommer", "good")
         log("12 klar")
     end)
 end
 
 rebuild = function()
     teardown()
-    task.wait(0.05)
+    task.wait(0.1)
     local ok, e = pcall(buildGUI)
     if not ok then
         warn("[Venice] rebuild: " .. tostring(e))
@@ -1452,6 +1675,10 @@ rebuild = function()
 end
 
 bindSharedInput()
+
+-- Startfördröjning för att låta executor stabilisera sig
+task.wait(0.2)
+
 local okB, errB = pcall(buildGUI)
 if not okB then
     warn("[Venice] BYGGE MISSLYCKADES: " .. tostring(errB))
