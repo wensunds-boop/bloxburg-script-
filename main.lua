@@ -1,22 +1,13 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.3  ·  Bloxburg client tuning suite
-  Author: Venice
-  License: MIT — no telemetry, no HTTP calls beyond the loader,
-           no hidden downloads, no backdoors.
+  Venice Speed Suite  v1.4  ·  Bloxburg client tuning suite
+  Author: Venice · MIT
   ---------------------------------------------------------------------
-  All writes are CLIENT-SIDE. The server stays authoritative.
-  WalkSpeed is re-asserted every frame because Bloxburg's controller
-  stomps it. Vehicle tuning writes MaxSpeed/MaxTorque on a 0.25s
-  throttle and runs an assist that self-probes and falls back.
-  Zones are AABB boxes in world space.
-
-  v1.3
-    · primary part resolved from the seat's assembly root, cached
-    · assist probes for real acceleration and switches to direct
-      velocity writes when the constraint has no effect
-    · anchored vehicles flagged in the readout
-    · method + seat count shown live
+  CLIENT-SIDE ONLY. The server stays authoritative.
+  KICK CAVEAT: Player:Kick() called from a client is a client-side
+  request. It always removes the target from YOUR view. Whether the
+  server also drops them depends on the game — Bloxburg generally
+  re-adds them. Do not treat it as a server ban.
 =====================================================================]]
 
 local Players          = game:GetService("Players")
@@ -24,12 +15,17 @@ local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService     = game:GetService("TweenService")
 local HttpService      = game:GetService("HttpService")
+local StarterGui       = game:GetService("StarterGui")
 
 local LP        = Players.LocalPlayer
 local PlayerGui = LP:WaitForChild("PlayerGui", 30)
 
 if not PlayerGui then
     return warn("[Venice] PlayerGui never appeared.")
+end
+
+local function log(msg)
+    print("[Venice] " .. msg)
 end
 
 --=====================================================================
@@ -54,7 +50,6 @@ local function deepCopy(t)
 end
 
 local state = deepCopy(DEFAULTS)
-
 local hasFS = pcall(function() return writefile ~= nil end)
 
 local function num(v, fallback, min, max)
@@ -262,6 +257,7 @@ local PAGE_CANVAS = 820
 local function buildGUI()
     local myGen = generation
 
+    log("build: shell")
     local gui = new("ScreenGui", {
         Name = "VeniceSpeedSuite",
         ResetOnSpawn = false,
@@ -284,9 +280,7 @@ local function buildGUI()
     stroke(win, C.stroke, 1)
     tw(win, 0.26, { Size = UDim2.new(0, WIN_W, 0, WIN_H) }, Enum.EasingStyle.Back)
 
-    ---------------------------------------------------------------
-    -- HEADER
-    ---------------------------------------------------------------
+    log("build: header")
     local header = new("Frame", {
         Size = UDim2.new(1, 0, 0, 52),
         BackgroundColor3 = C.panel,
@@ -328,7 +322,7 @@ local function buildGUI()
         TextSize = 10,
         TextColor3 = C.dim,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "Bloxburg · client tuning · v1.3",
+        Text = "Bloxburg · client tuning · v1.4",
     }, header)
 
     local function headerButton(glyph, xOffset, color)
@@ -359,9 +353,7 @@ local function buildGUI()
     local minBtn   = headerButton("–", -68, C.dim)
     local closeBtn = headerButton("×", -36, C.bad)
 
-    ---------------------------------------------------------------
-    -- DRAG
-    ---------------------------------------------------------------
+    log("build: drag")
     local dragging, dragOffset = false, nil
 
     track(header.InputBegan:Connect(function(input)
@@ -388,9 +380,7 @@ local function buildGUI()
         end
     end))
 
-    ---------------------------------------------------------------
-    -- TOASTS
-    ---------------------------------------------------------------
+    log("build: toasts")
     local toastHolder = new("Frame", {
         Size = UDim2.new(0, 250, 1, -80),
         Position = UDim2.new(1, -262, 0, 64),
@@ -403,7 +393,7 @@ local function buildGUI()
         Padding = UDim.new(0, 6),
     }, toastHolder)
 
-    local function notify(text, kind)
+    local function renderToast(text, kind)
         local color = kind == "bad" and C.bad or kind == "good" and C.good or state.ui.accent
         local box = new("Frame", {
             Size = UDim2.new(1, 0, 0, 34),
@@ -436,9 +426,25 @@ local function buildGUI()
         end)
     end
 
-    ---------------------------------------------------------------
-    -- TABS
-    ---------------------------------------------------------------
+    -- notiser köas så att inget GUI skapas inuti fysiksteget
+    local notifyQueue = {}
+    local function notify(text, kind)
+        table.insert(notifyQueue, { text = text, kind = kind })
+    end
+    task.spawn(function()
+        while gui.Parent do
+            task.wait(0.08)
+            if #notifyQueue > 0 then
+                local batch = notifyQueue
+                notifyQueue = {}
+                for _, item in ipairs(batch) do
+                    pcall(renderToast, item.text, item.kind)
+                end
+            end
+        end
+    end)
+
+    log("build: tabs")
     local tabBar = new("Frame", {
         Size = UDim2.new(1, -28, 0, 34),
         Position = UDim2.new(0, 14, 0, 62),
@@ -449,7 +455,7 @@ local function buildGUI()
     new("UIListLayout", {
         FillDirection = Enum.FillDirection.Horizontal,
         SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 4),
+        Padding = UDim.new(0, 3),
     }, tabBar)
     new("UIPadding", {
         PaddingLeft = UDim.new(0, 4),
@@ -466,19 +472,19 @@ local function buildGUI()
 
     local function buildTab(name, order)
         local btn = new("TextButton", {
-            Size = UDim2.new(0, #name * 7 + 30, 1, -8),
+            Size = UDim2.new(0, #name * 6 + 26, 1, -8),
             BackgroundColor3 = C.panel,
             BorderSizePixel = 0,
             AutoButtonColor = false,
             LayoutOrder = order,
             Font = Enum.Font.GothamMedium,
-            TextSize = 12,
+            TextSize = 11,
             TextColor3 = C.dim,
             Text = name,
         }, tabBar)
         new("UIPadding", {
-            PaddingLeft = UDim.new(0, 14),
-            PaddingRight = UDim.new(0, 14),
+            PaddingLeft = UDim.new(0, 11),
+            PaddingRight = UDim.new(0, 11),
         }, btn)
         corner(btn, 7)
 
@@ -514,11 +520,10 @@ local function buildGUI()
 
     local playerPage   = buildTab("Player", 1)
     local vehiclePage  = buildTab("Vehicle", 2)
-    local settingsPage = buildTab("Settings", 3)
+    local playersPage  = buildTab("Players", 3)
+    local settingsPage = buildTab("Settings", 4)
 
-    ---------------------------------------------------------------
-    -- WIDGETS
-    ---------------------------------------------------------------
+    log("build: widgets")
     local function card(parent, height, order)
         local box = new("Frame", {
             Size = UDim2.new(1, 0, 0, height),
@@ -657,7 +662,6 @@ local function buildGUI()
         end))
 
         render()
-
         return { set = function(v) setValue(v, false) end, get = function() return value end }
     end
 
@@ -798,8 +802,7 @@ local function buildGUI()
     end
 
     ---------------------------------------------------------------
-    -- PLAYER PAGE
-    ---------------------------------------------------------------
+    log("build: player page")
     local speedSlider
 
     do
@@ -890,8 +893,7 @@ local function buildGUI()
     end
 
     ---------------------------------------------------------------
-    -- VEHICLE PAGE
-    ---------------------------------------------------------------
+    log("build: vehicle page")
     local detectLabel, vehSpeed, vehInfo
 
     do
@@ -1010,8 +1012,162 @@ local function buildGUI()
     end
 
     ---------------------------------------------------------------
-    -- SETTINGS PAGE
+    log("build: players page")
+    do
+        local head = card(playersPage, 100, 1)
+        sectionLabel(head, "Server", 10)
+
+        local countLabel = new("TextLabel", {
+            Size = UDim2.new(1, -24, 0, 16),
+            Position = UDim2.new(0, 12, 0, 28),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            TextColor3 = C.dim,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "—",
+        }, head)
+
+        local kickAll = new("TextButton", {
+            Size = UDim2.new(1, -24, 0, 30),
+            Position = UDim2.new(0, 12, 0, 50),
+            BackgroundColor3 = C.cardAlt,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            TextColor3 = C.text,
+            Text = "Kick everyone else",
+        }, head)
+        corner(kickAll, 7)
+
+        local listCard = card(playersPage, 250, 2)
+        sectionLabel(listCard, "Spelare", 10)
+
+        local list = new("ScrollingFrame", {
+            Size = UDim2.new(1, -24, 0, 208),
+            Position = UDim2.new(0, 12, 0, 30),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = C.stroke,
+            CanvasSize = UDim2.new(0, 0, 0, 208),
+        }, listCard)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Padding = UDim.new(0, 4),
+        }, list)
+
+        local function kickTarget(plr)
+            if plr == LP then return end
+            local ok = pcall(function() plr:Kick("Kickad av Venice Speed Suite") end)
+            notify(ok and ("Kickade " .. plr.Name) or ("Kunde inte kicka " .. plr.Name),
+                ok and "good" or "bad")
+        end
+
+        local function refreshPlayers()
+            for _, c in ipairs(list:GetChildren()) do
+                if c:IsA("Frame") or c:IsA("TextLabel") then c:Destroy() end
+            end
+
+            local all = Players:GetPlayers()
+            countLabel.Text = string.format("%d spelare i servern · du är %s", #all, LP.Name)
+
+            local shown = 0
+            for _, plr in ipairs(all) do
+                if plr ~= LP then
+                    shown += 1
+                    local row = new("Frame", {
+                        Size = UDim2.new(1, 0, 0, 26),
+                        BackgroundColor3 = C.panel,
+                        BorderSizePixel = 0,
+                        LayoutOrder = shown,
+                    }, list)
+                    corner(row, 6)
+
+                    new("TextLabel", {
+                        Size = UDim2.new(1, -60, 1, 0),
+                        Position = UDim2.new(0, 8, 0, 0),
+                        BackgroundTransparency = 1,
+                        Font = Enum.Font.GothamMedium,
+                        TextSize = 10,
+                        TextColor3 = C.text,
+                        TextXAlignment = Enum.TextXAlignment.Left,
+                        TextTruncate = Enum.TextTruncate.AtEnd,
+                        Text = string.format("%s  (%s)", plr.DisplayName, plr.Name),
+                    }, row)
+
+                    local kb = new("TextButton", {
+                        Size = UDim2.new(0, 46, 0, 18),
+                        Position = UDim2.new(1, -52, 0.5, -9),
+                        BackgroundColor3 = Color3.fromRGB(48, 26, 30),
+                        BorderSizePixel = 0,
+                        AutoButtonColor = false,
+                        Font = Enum.Font.GothamBold,
+                        TextSize = 9,
+                        TextColor3 = C.bad,
+                        Text = "kick",
+                    }, row)
+                    corner(kb, 5)
+                    kb.MouseButton1Click:Connect(function() kickTarget(plr) end)
+                end
+            end
+
+            list.CanvasSize = UDim2.new(0, 0, 0, math.max(208, shown * 30 + 8))
+
+            if shown == 0 then
+                new("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 24),
+                    BackgroundTransparency = 1,
+                    Font = Enum.Font.GothamMedium,
+                    TextSize = 10,
+                    TextColor3 = C.dim,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    Text = "Du är ensam i servern.",
+                }, list)
+            end
+        end
+        refreshPlayers()
+
+        kickAll.MouseButton1Click:Connect(function()
+            local targets = 0
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LP then
+                    targets += 1
+                    pcall(function() plr:Kick("Kickad av Venice Speed Suite") end)
+                end
+            end
+            notify(targets > 0 and ("Kickade " .. targets .. " spelare") or "Ingen att kicka",
+                targets > 0 and "good" or "bad")
+            task.delay(0.5, refreshPlayers)
+        end)
+
+        track(Players.PlayerAdded:Connect(function() task.delay(0.5, refreshPlayers) end))
+        track(Players.PlayerRemoving:Connect(function() task.delay(0.5, refreshPlayers) end))
+        track(tabButtons.Players.MouseButton1Click:Connect(refreshPlayers))
+
+        task.spawn(function()
+            while gui.Parent do
+                task.wait(2.5)
+                if playersPage.Visible then pcall(refreshPlayers) end
+            end
+        end)
+
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 9,
+            TextWrapped = true,
+            TextColor3 = C.dim,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "Kick skickas från din klient. Spelaren försvinner alltid för dig; "
+                .. "servern kan lägga tillbaka dem. Det är inte en ban.",
+        }, playersPage).LayoutOrder = 3
+    end
+
     ---------------------------------------------------------------
+    log("build: settings page")
     do
         local limits = card(settingsPage, 110, 1)
         sectionLabel(limits, "Speed limits", 10)
@@ -1090,9 +1246,7 @@ local function buildGUI()
 
         local function renderZones()
             for _, child in ipairs(zoneList:GetChildren()) do
-                if child:IsA("Frame") or child:IsA("TextLabel") then
-                    child:Destroy()
-                end
+                if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
             end
 
             local count = #state.limits.zones
@@ -1241,8 +1395,7 @@ local function buildGUI()
     end
 
     ---------------------------------------------------------------
-    -- MINIMIZE / CLOSE / KEYBIND
-    ---------------------------------------------------------------
+    log("build: window controls")
     local minimized = false
     local expandedHeight = WIN_H
 
@@ -1291,8 +1444,7 @@ local function buildGUI()
     end))
 
     ---------------------------------------------------------------
-    -- ENGINES
-    ---------------------------------------------------------------
+    log("build: engines")
     local function zoneLimitAt(pos)
         if not state.limits.enabled then return nil end
         for _, zone in ipairs(state.limits.zones) do
@@ -1353,10 +1505,9 @@ local function buildGUI()
         return model, seat
     end
 
-    -- resolve the part that actually represents the chassis
     local function pickPrimary(model, seat)
-        local assemblyRoot = seat and seat.AssemblyRootPart
-        if assemblyRoot and assemblyRoot.Parent and not assemblyRoot.Anchored
+        local okRoot, assemblyRoot = pcall(function() return seat.AssemblyRootPart end)
+        if okRoot and assemblyRoot and assemblyRoot.Parent and not assemblyRoot.Anchored
             and not assemblyRoot:IsA("Seat") and not assemblyRoot:IsA("VehicleSeat") then
             return assemblyRoot
         end
@@ -1403,10 +1554,10 @@ local function buildGUI()
     end
 
     local assist = {
-        mode = "detect", timer = 0, seat = nil, seats = {},
+        mode = "detect", timer = 0, seat = nil, lastSeat = nil, seats = {},
         applied = nil, writeTimer = 0,
         direct = false, probe = 0, probeFrom = 0,
-        primary = nil, anchored = false, lastSeat = nil,
+        primary = nil, anchored = false, lastNote = 0,
     }
 
     local function resetAssist()
@@ -1446,22 +1597,32 @@ local function buildGUI()
             assist.direct, assist.probe = false, 0
             clearAssistRig()
             cacheSeats(model)
-            assist.primary = pickPrimary(model, seat)
+
+            local okPick, picked = pcall(pickPrimary, model, seat)
+            assist.primary = okPick and picked or nil
             assist.anchored = assist.primary ~= nil and assist.primary.Anchored
-            if assist.anchored then
+
+            if assist.anchored and os.clock() - assist.lastNote > 3 then
+                assist.lastNote = os.clock()
                 notify("Bilen har anchrade delar — fart går ej att ändra", "bad")
             end
         end
 
         local primary = assist.primary
         if not primary or not primary.Parent then
-            primary = pickPrimary(model, seat)
+            local okPick, picked = pcall(pickPrimary, model, seat)
+            primary = okPick and picked or nil
             assist.primary = primary
             assist.anchored = primary ~= nil and primary.Anchored
         end
 
-        local velocity = primary and primary.AssemblyLinearVelocity or Vector3.zero
+        local velocity = Vector3.zero
+        if primary then
+            local okVel, v = pcall(function() return primary.AssemblyLinearVelocity end)
+            if okVel and typeof(v) == "Vector3" then velocity = v end
+        end
         local speed = velocity.Magnitude
+
         local method = assist.anchored and "anchrad"
             or (assist.direct and "direkt" or "constraint")
         local info = string.format("metod: %s · %d säten", method, #assist.seats)
@@ -1493,8 +1654,8 @@ local function buildGUI()
 
         local throttle = 0
         if seat:IsA("VehicleSeat") then
-            local ok, raw = pcall(function() return seat.ThrottleFloat end)
-            if ok and type(raw) == "number" then throttle = raw end
+            local okT, raw = pcall(function() return seat.ThrottleFloat end)
+            if okT and type(raw) == "number" then throttle = raw end
         end
 
         assist.timer += dt
@@ -1504,7 +1665,12 @@ local function buildGUI()
             assist.mode = "hold"
         end
 
-        local forward = primary.CFrame.LookVector
+        local okFwd, forward = pcall(function() return primary.CFrame.LookVector end)
+        if not okFwd or typeof(forward) ~= "Vector3" then
+            if updater then updater(model.Name, speed, nil, info) end
+            return
+        end
+
         local forwardSpeed = velocity:Dot(forward)
         local desired
 
@@ -1523,7 +1689,6 @@ local function buildGUI()
         local step = math.clamp(desired - forwardSpeed, -rate * dt, rate * dt)
         local engaged = math.abs(step) > 0.01
 
-        -- probe: does the constraint actually accelerate the car?
         if engaged and increasing and not assist.direct then
             if assist.probe == 0 then
                 assist.probe = 0.0001
@@ -1579,13 +1744,27 @@ local function buildGUI()
     end))
 
     tabButtons.Player.MouseButton1Click:Fire()
-    notify("Venice Speed Suite v1.3 · " .. state.ui.keybind.Name .. " toggles GUI", "good")
+    notify("Venice Speed Suite v1.4 · " .. state.ui.keybind.Name .. " toggles GUI", "good")
+    log("build: done")
 end
 
 rebuild = function()
     teardown()
     task.wait(0.05)
-    buildGUI()
+    local ok, err = pcall(buildGUI)
+    if not ok then
+        warn("[Venice] rebuild failed: " .. tostring(err))
+    end
 end
 
-buildGUI()
+local okBuild, buildErr = pcall(buildGUI)
+if not okBuild then
+    warn("[Venice] BUILD FAILED: " .. tostring(buildErr))
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Venice Speed Suite",
+            Text = "Build misslyckades: " .. tostring(buildErr),
+            Duration = 12,
+        })
+    end)
+end
