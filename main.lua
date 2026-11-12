@@ -1,6 +1,6 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.2  ·  Bloxburg client tuning suite
+  Venice Speed Suite  v1.3  ·  Bloxburg client tuning suite
   Author: Venice
   License: MIT — no telemetry, no HTTP calls beyond the loader,
            no hidden downloads, no backdoors.
@@ -8,8 +8,15 @@
   All writes are CLIENT-SIDE. The server stays authoritative.
   WalkSpeed is re-asserted every frame because Bloxburg's controller
   stomps it. Vehicle tuning writes MaxSpeed/MaxTorque on a 0.25s
-  throttle plus an optional line-mode LinearVelocity assist.
+  throttle and runs an assist that self-probes and falls back.
   Zones are AABB boxes in world space.
+
+  v1.3
+    · primary part resolved from the seat's assembly root, cached
+    · assist probes for real acceleration and switches to direct
+      velocity writes when the constraint has no effect
+    · anchored vehicles flagged in the readout
+    · method + seat count shown live
 =====================================================================]]
 
 local Players          = game:GetService("Players")
@@ -321,7 +328,7 @@ local function buildGUI()
         TextSize = 10,
         TextColor3 = C.dim,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "Bloxburg · client tuning · v1.2",
+        Text = "Bloxburg · client tuning · v1.3",
     }, header)
 
     local function headerButton(glyph, xOffset, color)
@@ -885,10 +892,10 @@ local function buildGUI()
     ---------------------------------------------------------------
     -- VEHICLE PAGE
     ---------------------------------------------------------------
-    local detectLabel, vehSpeed
+    local detectLabel, vehSpeed, vehInfo
 
     do
-        local detect = card(vehiclePage, 72, 1)
+        local detect = card(vehiclePage, 90, 1)
         sectionLabel(detect, "Vehicle detection", 10)
 
         detectLabel = new("TextLabel", {
@@ -911,6 +918,17 @@ local function buildGUI()
             TextColor3 = C.dim,
             TextXAlignment = Enum.TextXAlignment.Left,
             Text = "0.0 st/s · 0 km/h (est.)",
+        }, detect)
+
+        vehInfo = new("TextLabel", {
+            Size = UDim2.new(1, -24, 0, 14),
+            Position = UDim2.new(0, 12, 0, 68),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 9,
+            TextColor3 = C.dim,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "metod: —",
         }, detect)
 
         local main = card(vehiclePage, 152, 2)
@@ -981,14 +999,13 @@ local function buildGUI()
             end,
         })
 
-        _G.__VeniceSpeedSuite.updateVehicleReadout = function(name, speed, mode)
+        _G.__VeniceSpeedSuite.updateVehicleReadout = function(name, speed, mode, info)
             detectLabel.Text = name and ("Detected: " .. name) or "Not seated"
             detectLabel.TextColor3 = name and C.good or C.dim
             vehSpeed.Text = string.format("%.1f st/s · %.0f km/h (est.)", speed, speed * 1.008)
             vehSpeed.TextColor3 = speed > 0.5 and C.text or C.dim
-            if mode == "hold" then
-                vehSpeed.Text ..= "  ·  cap mode"
-            end
+            vehInfo.Text = info or "metod: —"
+            vehInfo.TextColor3 = (info and info:find("anchrad")) and C.bad or C.dim
         end
     end
 
@@ -1336,6 +1353,30 @@ local function buildGUI()
         return model, seat
     end
 
+    -- resolve the part that actually represents the chassis
+    local function pickPrimary(model, seat)
+        local assemblyRoot = seat and seat.AssemblyRootPart
+        if assemblyRoot and assemblyRoot.Parent and not assemblyRoot.Anchored
+            and not assemblyRoot:IsA("Seat") and not assemblyRoot:IsA("VehicleSeat") then
+            return assemblyRoot
+        end
+
+        local best, bestScore = nil, -1
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") and not d.Anchored
+                and not d:IsA("Seat") and not d:IsA("VehicleSeat") then
+                local n = d.Name:lower()
+                local wheel = n:find("wheel") or n:find("tire")
+                    or n:find("tyre") or n:find("rim")
+                local score = d.AssemblyMass * (wheel and 0.2 or 1)
+                if score > bestScore then
+                    best, bestScore = d, score
+                end
+            end
+        end
+        return best or model.PrimaryPart or assemblyRoot
+    end
+
     local rig = { part = nil, attachment = nil, force = nil }
 
     clearAssistRig = function()
@@ -1361,7 +1402,22 @@ local function buildGUI()
         return ok and rig.force ~= nil and rig.force.Parent ~= nil
     end
 
-    local assist = { mode = "detect", timer = 0, seat = nil, seats = {}, applied = nil, writeTimer = 0 }
+    local assist = {
+        mode = "detect", timer = 0, seat = nil, seats = {},
+        applied = nil, writeTimer = 0,
+        direct = false, probe = 0, probeFrom = 0,
+        primary = nil, anchored = false, lastSeat = nil,
+    }
+
+    local function resetAssist()
+        assist.mode, assist.timer = "detect", 0
+        assist.seat, assist.lastSeat = nil, nil
+        assist.applied, assist.writeTimer = nil, 0
+        assist.direct, assist.probe = false, 0
+        assist.primary, assist.anchored = nil, false
+        table.clear(assist.seats)
+        clearAssistRig()
+    end
 
     local function cacheSeats(model)
         table.clear(assist.seats)
@@ -1375,34 +1431,44 @@ local function buildGUI()
         local updater = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.updateVehicleReadout
 
         if not model then
-            assist.mode, assist.timer, assist.seat = "detect", 0, nil
-            assist.applied = nil
-            table.clear(assist.seats)
-            if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
+            if assist.lastSeat ~= nil then
+                assist.lastSeat = nil
+                resetAssist()
+            end
             if updater then updater(nil, 0) end
             return
         end
 
-        if assist.seat ~= seat then
+        if assist.lastSeat ~= seat then
+            assist.lastSeat = seat
             assist.seat, assist.mode, assist.timer = seat, "detect", 0
             assist.applied, assist.writeTimer = nil, 0
+            assist.direct, assist.probe = false, 0
             clearAssistRig()
             cacheSeats(model)
+            assist.primary = pickPrimary(model, seat)
+            assist.anchored = assist.primary ~= nil and assist.primary.Anchored
+            if assist.anchored then
+                notify("Bilen har anchrade delar — fart går ej att ändra", "bad")
+            end
         end
 
-        local primary = model.PrimaryPart
-        if not primary then
-            for _, d in ipairs(model:GetDescendants()) do
-                if d:IsA("BasePart") then primary = d; break end
-            end
+        local primary = assist.primary
+        if not primary or not primary.Parent then
+            primary = pickPrimary(model, seat)
+            assist.primary = primary
+            assist.anchored = primary ~= nil and primary.Anchored
         end
 
         local velocity = primary and primary.AssemblyLinearVelocity or Vector3.zero
         local speed = velocity.Magnitude
+        local method = assist.anchored and "anchrad"
+            or (assist.direct and "direkt" or "constraint")
+        local info = string.format("metod: %s · %d säten", method, #assist.seats)
 
         if not state.vehicle.enabled then
             if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-            if updater then updater(model.Name, speed) end
+            if updater then updater(model.Name, speed, nil, info) end
             return
         end
 
@@ -1419,9 +1485,9 @@ local function buildGUI()
             end)
         end
 
-        if not state.vehicle.assist or not primary then
+        if not state.vehicle.assist or not primary or assist.anchored then
             if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-            if updater then updater(model.Name, speed) end
+            if updater then updater(model.Name, speed, nil, info) end
             return
         end
 
@@ -1457,18 +1523,40 @@ local function buildGUI()
         local step = math.clamp(desired - forwardSpeed, -rate * dt, rate * dt)
         local engaged = math.abs(step) > 0.01
 
-        if ensureRig(primary) then
+        -- probe: does the constraint actually accelerate the car?
+        if engaged and increasing and not assist.direct then
+            if assist.probe == 0 then
+                assist.probe = 0.0001
+                assist.probeFrom = forwardSpeed
+            else
+                assist.probe += dt
+                if assist.probe > 1.0 then
+                    if math.abs(forwardSpeed - assist.probeFrom) < 2 then
+                        assist.direct = true
+                        notify("Assist: ingen effekt — byter till direkt metod", "bad")
+                    end
+                    assist.probe = 0
+                end
+            end
+        elseif not increasing then
+            assist.probe = 0
+        end
+
+        if not assist.direct and ensureRig(primary) then
             rig.force.LineDirection = forward
             rig.force.LineVelocity = forwardSpeed + step
             rig.force.MaxForce = engaged
                 and math.max(primary.AssemblyMass * rate * 2, 12000)
                 or 0
         else
-            local newVelocity = forward * (forwardSpeed + step) + Vector3.new(0, velocity.Y, 0)
-            pcall(function() primary.AssemblyLinearVelocity = newVelocity end)
+            if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
+            if engaged then
+                local nv = forward * (forwardSpeed + step) + Vector3.new(0, velocity.Y, 0)
+                pcall(function() primary.AssemblyLinearVelocity = nv end)
+            end
         end
 
-        if updater then updater(model.Name, speed, assist.mode) end
+        if updater then updater(model.Name, speed, assist.mode, info) end
     end
 
     task.delay(0.4, function()
@@ -1486,15 +1574,12 @@ local function buildGUI()
 
     track(LP.CharacterAdded:Connect(function()
         task.wait(0.6)
-        assist.mode, assist.timer, assist.seat = "detect", 0, nil
-        assist.applied = nil
-        table.clear(assist.seats)
-        clearAssistRig()
+        resetAssist()
         notify("Character respawned — tuning re-armed", nil)
     end))
 
     tabButtons.Player.MouseButton1Click:Fire()
-    notify("Venice Speed Suite v1.2 · " .. state.ui.keybind.Name .. " toggles GUI", "good")
+    notify("Venice Speed Suite v1.3 · " .. state.ui.keybind.Name .. " toggles GUI", "good")
 end
 
 rebuild = function()
