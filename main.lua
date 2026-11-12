@@ -1,17 +1,15 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.8  ·  Bloxburg  ·  Xeno stable build
+  Venice Speed Suite  v1.9  ·  Bloxburg
   ---------------------------------------------------------------------
-  Fixar från v1.7.1:
-    · ingen mer workspace:GetDescendants() i hot-loopar
-    · prompt-cache via DescendantAdded/Removing (eventbaserad)
-    · chunked initial scan med task.wait mellan chunks
-    · throttlad vehicle-loop (20 Hz) och player-loop (15 Hz)
-    · pizza-loopen rör bara cachade prompts, aldrig hela workspace
-    · robustare executor-detektion (Xeno, Synapse, Fluxus, Delta)
-    · borttaget fallback-tryck på okända prompts
-    · borttaget :Fire()-hack på TextButton
-    · minnesskydd på cooldown-tabellen
+  v1.9 - Pizza auto-farm komplett omskriven
+    · AGGRESSIVE-lage: trycker alla ProximityPrompts + ClickDetectors inom radien
+    · Live debug-vy med avstand och text pa allt som detekteras
+    · Fire-metoder: fireproximityprompt, hold-override, getconnections, fireclickdetector
+    · Per-prompt cooldown justerbar
+    · Blacklist mot forfeltraffar (dorrar, sangar, saten osv)
+    · Testknapp for att trycka ett specifikt mal
+    · Statistik: antal prompts/clicks tryckta, vilken metod funkade
 =====================================================================]]
 
 local Players          = game:GetService("Players")
@@ -23,7 +21,7 @@ local LP        = Players.LocalPlayer
 local PlayerGui = LP:WaitForChild("PlayerGui", 30)
 if not PlayerGui then return warn("[Venice] ingen PlayerGui") end
 
-local VERSION = "1.8"
+local VERSION = "1.9"
 local function log(m) print(string.format("[Venice %s] %s", VERSION, m)) end
 
 --=====================================================================
@@ -32,18 +30,37 @@ local function log(m) print(string.format("[Venice %s] %s", VERSION, m)) end
 local CONFIG_FILE = "VeniceSpeedSuite.json"
 local MAX_ZONES   = 40
 
-local DEFAULT_KEYWORDS = {
-    "dough", "sauce", "cheese", "pepperoni", "topping", "oven",
-    "bake", "cook", "cut", "slice", "box", "package", "order",
-    "deliver", "pizza", "knead", "prepare", "serve",
+local DEFAULT_BLACKLIST = {
+    "door", "gate", "exit", "entrance",
+    "sleep", "bed", "sit", "chair", "seat",
+    "menu", "shop", "buy", "purchase", "sell",
+    "radio", "tv", "television", "stereo",
+    "toilet", "sink", "shower", "bath",
+    "trash", "bin", "garbage",
 }
 
 local DEFAULTS = {
     player  = { enabled = false, speed = 34, jumpEnabled = false, jump = 50 },
     vehicle = { enabled = false, maxSpeed = 130, accel = 110, brake = 190, assist = true },
     limits  = { enabled = false, global = 110, zones = {} },
-    job     = { enabled = false, interval = 0.15, radius = 25, keywords = DEFAULT_KEYWORDS },
-    ui      = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
+    job     = {
+        enabled   = false,
+        mode      = "aggressive",     -- "aggressive" | "keyword"
+        interval  = 0.1,
+        radius    = 15,
+        cooldown  = 0.6,
+        firePrompts = true,
+        fireClicks  = true,
+        useBlacklist = true,
+        blacklist = DEFAULT_BLACKLIST,
+        keywords  = {
+            "dough", "sauce", "cheese", "pepperoni", "topping", "oven",
+            "bake", "cook", "cut", "slice", "box", "package", "order",
+            "deliver", "pizza", "knead", "prepare", "serve", "grab",
+            "take", "put", "flatten", "roll",
+        },
+    },
+    ui = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
 }
 
 local function deepCopy(t)
@@ -55,9 +72,9 @@ end
 local state = deepCopy(DEFAULTS)
 
 --=====================================================================
--- FILESYSTEM (robust executor detection)
+-- FILESYSTEM
 --=====================================================================
-local fs = { has = false, read = nil, write = nil, exists = nil }
+local fs = { has = false }
 do
     local function try(name)
         local ok, fn = pcall(function()
@@ -76,17 +93,13 @@ do
     fs.has = (fs.read ~= nil and fs.write ~= nil)
 end
 
---=====================================================================
--- CONFIG I/O
---=====================================================================
-local function clampNum(v, fallback, mn, mx)
-    if type(v) ~= "number" or v ~= v then return fallback end
+local function clampNum(v, f, mn, mx)
+    if type(v) ~= "number" or v ~= v then return f end
     return math.clamp(v, mn, mx)
 end
 
 local function loadConfig()
     if not fs.has then return end
-    if fs.exists and not pcall(fs.exists, CONFIG_FILE) then return end
     local ok, raw = pcall(fs.read, CONFIG_FILE)
     if not ok or type(raw) ~= "string" or #raw < 2 then return end
     local ok2, d = pcall(function() return HttpService:JSONDecode(raw) end)
@@ -131,27 +144,37 @@ local function loadConfig()
     if type(d.job) == "table" then
         local j = d.job
         if type(j.enabled) == "boolean" then state.job.enabled = j.enabled end
-        state.job.interval = clampNum(j.interval, 0.15, 0.05, 3)
-        state.job.radius   = clampNum(j.radius, 25, 4, 60)
+        if j.mode == "keyword" or j.mode == "aggressive" then state.job.mode = j.mode end
+        state.job.interval = clampNum(j.interval, 0.1, 0.05, 3)
+        state.job.radius   = clampNum(j.radius, 15, 2, 80)
+        state.job.cooldown = clampNum(j.cooldown, 0.6, 0.1, 10)
+        if type(j.firePrompts) == "boolean" then state.job.firePrompts = j.firePrompts end
+        if type(j.fireClicks) == "boolean" then state.job.fireClicks = j.fireClicks end
+        if type(j.useBlacklist) == "boolean" then state.job.useBlacklist = j.useBlacklist end
         if type(j.keywords) == "table" then
             local out = {}
             for _, w in ipairs(j.keywords) do
-                if type(w) == "string" and #w > 0 then
-                    table.insert(out, w:lower())
-                end
+                if type(w) == "string" and #w > 0 then table.insert(out, w:lower()) end
             end
             if #out > 0 then state.job.keywords = out end
+        end
+        if type(j.blacklist) == "table" then
+            local out = {}
+            for _, w in ipairs(j.blacklist) do
+                if type(w) == "string" and #w > 0 then table.insert(out, w:lower()) end
+            end
+            state.job.blacklist = out
         end
     end
     if type(d.ui) == "table" then
         if type(d.ui.accent) == "table" then
-            local ok3, col = pcall(Color3.fromRGB,
+            local okc, col = pcall(Color3.fromRGB,
                 d.ui.accent[1] or 94, d.ui.accent[2] or 141, d.ui.accent[3] or 255)
-            if ok3 then state.ui.accent = col end
+            if okc then state.ui.accent = col end
         end
         if type(d.ui.keybind) == "string" then
-            local ok4, k = pcall(function() return Enum.KeyCode[d.ui.keybind] end)
-            if ok4 and k then state.ui.keybind = k end
+            local oke, k = pcall(function() return Enum.KeyCode[d.ui.keybind] end)
+            if oke and k then state.ui.keybind = k end
         end
     end
 end
@@ -189,10 +212,7 @@ loadConfig()
 -- UTILITIES
 --=====================================================================
 local connections = {}
-local function track(c)
-    if c then table.insert(connections, c) end
-    return c
-end
+local function track(c) if c then table.insert(connections, c) end; return c end
 
 local generation = 0
 
@@ -200,12 +220,10 @@ local function getHumanoid()
     local c = LP.Character
     return c and c:FindFirstChildOfClass("Humanoid") or nil
 end
-
 local function getRoot()
     local c = LP.Character
     return c and c:FindFirstChild("HumanoidRootPart") or nil
 end
-
 local function viewport()
     local cam = workspace.CurrentCamera
     return cam and cam.ViewportSize or Vector2.new(1280, 720)
@@ -214,9 +232,7 @@ end
 local function newInstance(class, props, parent)
     local inst = Instance.new(class)
     for k, v in pairs(props) do
-        if k ~= "Parent" then
-            pcall(function() inst[k] = v end)
-        end
+        if k ~= "Parent" then pcall(function() inst[k] = v end) end
     end
     inst.Parent = parent or props.Parent
     return inst
@@ -235,7 +251,7 @@ local C = {
 }
 
 --=====================================================================
--- EXECUTOR-SÄKER PROMPT & CLICK FIRING
+-- EXECUTOR BRIDGE
 --=====================================================================
 local Exec = {}
 do
@@ -248,136 +264,309 @@ do
         end
         return nil
     end
-    Exec.fireprompt = resolve("fireproximityprompt")
-    Exec.fireclick  = resolve("fireclickdetector")
+    Exec.fireprompt     = resolve("fireproximityprompt")
+    Exec.fireclick      = resolve("fireclickdetector")
+    Exec.getconnections = resolve("getconnections")
+    Exec.gethui         = resolve("gethui")
+    log(string.format("exec: fireprompt=%s fireclick=%s getconnections=%s",
+        tostring(Exec.fireprompt ~= nil),
+        tostring(Exec.fireclick ~= nil),
+        tostring(Exec.getconnections ~= nil)))
 end
 
-local function firePrompt(prompt)
-    if not prompt or not prompt.Parent then return false end
-    if Exec.fireprompt then
-        local ok = pcall(Exec.fireprompt, prompt)
-        if ok then return true end
+--=====================================================================
+-- PIZZA MODULE  (from scratch)
+--=====================================================================
+local Pizza = {
+    cache = {
+        prompts = {},         -- [ProximityPrompt] = { part, text }
+        clicks  = {},         -- [ClickDetector]   = { part, text }
+        promptCount = 0,
+        clickCount  = 0,
+        primed = false,
+    },
+    cooldowns = {},           -- [instance] = os.clock when last fired
+    stats = {
+        actions = 0,
+        promptFires = 0,
+        clickFires = 0,
+        failures = 0,
+        lastMethod = "-",
+        lastTarget = "-",
+        lastFireTime = 0,
+    },
+    detected = {},            -- last scan result for debug view
+    lastDebugUpdate = 0,
+}
+
+local function pizzaTextFor(inst, part)
+    if inst:IsA("ProximityPrompt") then
+        local a = inst.ActionText or ""
+        local o = inst.ObjectText or ""
+        return (a .. " " .. o .. " " .. part.Name):lower()
     end
-    -- Fallback: simulate hold
+    return part.Name:lower()
+end
+
+local function pizzaCacheAdd(desc)
+    if desc:IsA("ProximityPrompt") then
+        local par = desc.Parent
+        if par and par:IsA("BasePart") and not Pizza.cache.prompts[desc] then
+            Pizza.cache.prompts[desc] = { part = par, text = pizzaTextFor(desc, par) }
+            Pizza.cache.promptCount += 1
+        end
+    elseif desc:IsA("ClickDetector") then
+        local par = desc.Parent
+        if par and par:IsA("BasePart") and not Pizza.cache.clicks[desc] then
+            Pizza.cache.clicks[desc] = { part = par, text = par.Name:lower() }
+            Pizza.cache.clickCount += 1
+        end
+    end
+end
+
+local function pizzaCacheRemove(desc)
+    if Pizza.cache.prompts[desc] then
+        Pizza.cache.prompts[desc] = nil
+        Pizza.cache.promptCount -= 1
+    elseif Pizza.cache.clicks[desc] then
+        Pizza.cache.clicks[desc] = nil
+        Pizza.cache.clickCount -= 1
+    end
+end
+
+local function pizzaPrime()
+    if Pizza.cache.primed then return end
+    Pizza.cache.primed = true
+    log("priming pizza cache...")
+    task.spawn(function()
+        local gen = generation
+        local descendants = workspace:GetDescendants()
+        local batch = 0
+        for i = 1, #descendants do
+            if gen ~= generation then return end
+            pizzaCacheAdd(descendants[i])
+            batch += 1
+            if batch >= 400 then
+                batch = 0
+                task.wait()
+            end
+        end
+        log(string.format("cache primed: %d prompts, %d clicks",
+            Pizza.cache.promptCount, Pizza.cache.clickCount))
+    end)
+    track(workspace.DescendantAdded:Connect(pizzaCacheAdd))
+    track(workspace.DescendantRemoving:Connect(pizzaCacheRemove))
+end
+
+-- Firing methods
+local function pizzaFirePrompt(prompt)
+    -- 1: executor method (bypass hold-time, LoS, enabled)
+    if Exec.fireprompt then
+        local ok = pcall(Exec.fireprompt, prompt, 0)
+        if ok then return true, "fireproximityprompt" end
+    end
+    -- 2: temporarily zero out HoldDuration, then trigger
+    local origHold = prompt.HoldDuration
+    local okOverride = pcall(function()
+        prompt.HoldDuration = 0
+        prompt:InputHoldBegin()
+        prompt:InputHoldEnd()
+    end)
+    pcall(function() prompt.HoldDuration = origHold end)
+    if okOverride then return true, "hold-override" end
+    -- 3: natural hold
     local ok = pcall(function()
         prompt:InputHoldBegin()
-        task.delay(math.max(prompt.HoldDuration, 0.05) + 0.02, function()
+        task.delay(prompt.HoldDuration + 0.05, function()
             if prompt and prompt.Parent then
                 pcall(function() prompt:InputHoldEnd() end)
             end
         end)
     end)
-    return ok
+    return ok, ok and "hold-natural" or "failed"
 end
 
-local function fireClick(cd)
-    if not cd or not cd.Parent then return false end
+local function pizzaFireClick(cd)
+    -- 1: executor method
     if Exec.fireclick then
         local ok = pcall(Exec.fireclick, cd, 0)
-        if ok then return true end
+        if ok then return true, "fireclickdetector" end
+    end
+    -- 2: fire via getconnections on MouseClick signal
+    if Exec.getconnections then
+        local ok, fired = pcall(function()
+            local count = 0
+            for _, conn in ipairs(Exec.getconnections(cd.MouseClick)) do
+                if conn.Function then
+                    pcall(conn.Function, LP)
+                    count += 1
+                elseif conn.Fire then
+                    pcall(conn.Fire, conn, LP)
+                    count += 1
+                end
+            end
+            return count > 0
+        end)
+        if ok and fired then return true, "getconnections" end
+    end
+    return false, "no-method"
+end
+
+local function pizzaInBlacklist(text)
+    if not state.job.useBlacklist then return false end
+    for _, bad in ipairs(state.job.blacklist) do
+        if text:find(bad, 1, true) then return true, bad end
     end
     return false
 end
 
---=====================================================================
--- PROMPT/CLICK CACHE  (eventbaserad - inget tungt iterande)
---=====================================================================
-local Cache = {
-    prompts = {},        -- [prompt] = { text = str, part = BasePart }
-    clicks  = {},        -- [cd]     = { text = str, part = BasePart }
-    promptCount = 0,
-    clickCount  = 0,
-    primed = false,
-}
-
-local function textFor(inst, part)
-    local parts = { part.Name }
-    if inst:IsA("ProximityPrompt") then
-        if inst.ActionText and #inst.ActionText > 0 then
-            table.insert(parts, inst.ActionText)
-        end
-        if inst.ObjectText and #inst.ObjectText > 0 then
-            table.insert(parts, inst.ObjectText)
-        end
+local function pizzaMatchesKeyword(text)
+    for _, kw in ipairs(state.job.keywords) do
+        if text:find(kw, 1, true) then return true, kw end
     end
-    return table.concat(parts, " "):lower()
+    return false
 end
 
-local function cacheAdd(desc)
-    if desc:IsA("ProximityPrompt") then
-        local par = desc.Parent
-        if par and par:IsA("BasePart") and not Cache.prompts[desc] then
-            Cache.prompts[desc] = { text = textFor(desc, par), part = par }
-            Cache.promptCount += 1
-        end
-    elseif desc:IsA("ClickDetector") then
-        local par = desc.Parent
-        if par and par:IsA("BasePart") and not Cache.clicks[desc] then
-            Cache.clicks[desc] = { text = par.Name:lower(), part = par }
-            Cache.clickCount += 1
-        end
-    end
-end
+local function pizzaScan(rootPos)
+    local radius = state.job.radius
+    local radiusSq = radius * radius
+    local found = {}
 
-local function cacheRemove(desc)
-    if Cache.prompts[desc] then
-        Cache.prompts[desc] = nil
-        Cache.promptCount -= 1
-    elseif Cache.clicks[desc] then
-        Cache.clicks[desc] = nil
-        Cache.clickCount -= 1
-    end
-end
-
-local function primeCache()
-    if Cache.primed then return end
-    Cache.primed = true
-    task.spawn(function()
-        local gen = generation
-        local scanned, batch = 0, 0
-        local descendants = workspace:GetDescendants()
-        for i = 1, #descendants do
-            if gen ~= generation then return end
-            cacheAdd(descendants[i])
-            scanned += 1
-            batch += 1
-            if batch >= 500 then           -- yielda var 500:e
-                batch = 0
-                task.wait()
+    if state.job.firePrompts then
+        for prompt, info in pairs(Pizza.cache.prompts) do
+            if prompt.Parent and info.part.Parent then
+                local off = info.part.Position - rootPos
+                local d2 = off.X*off.X + off.Y*off.Y + off.Z*off.Z
+                if d2 <= radiusSq then
+                    table.insert(found, {
+                        kind = "prompt", inst = prompt, text = info.text,
+                        dist = math.sqrt(d2),
+                        display = string.format("[P] %s / %s @ %s",
+                            prompt.ActionText or "", prompt.ObjectText or "", info.part.Name),
+                    })
+                end
             end
         end
-        log(string.format("cache primed · %d prompts · %d clicks", Cache.promptCount, Cache.clickCount))
-    end)
-    track(workspace.DescendantAdded:Connect(cacheAdd))
-    track(workspace.DescendantRemoving:Connect(cacheRemove))
+    end
+    if state.job.fireClicks then
+        for cd, info in pairs(Pizza.cache.clicks) do
+            if cd.Parent and info.part.Parent then
+                local off = info.part.Position - rootPos
+                local d2 = off.X*off.X + off.Y*off.Y + off.Z*off.Z
+                if d2 <= radiusSq then
+                    table.insert(found, {
+                        kind = "click", inst = cd, text = info.text,
+                        dist = math.sqrt(d2),
+                        display = string.format("[C] %s", info.part.Name),
+                    })
+                end
+            end
+        end
+    end
+    table.sort(found, function(a, b) return a.dist < b.dist end)
+    return found
+end
+
+local function pizzaFireOne(cand)
+    local ok, method
+    if cand.kind == "prompt" then
+        ok, method = pizzaFirePrompt(cand.inst)
+        if ok then Pizza.stats.promptFires += 1 end
+    else
+        ok, method = pizzaFireClick(cand.inst)
+        if ok then Pizza.stats.clickFires += 1 end
+    end
+    if ok then
+        Pizza.stats.actions += 1
+        Pizza.stats.lastFireTime = os.clock()
+    else
+        Pizza.stats.failures += 1
+    end
+    Pizza.stats.lastMethod = method
+    Pizza.stats.lastTarget = cand.display:sub(1, 50)
+    return ok
+end
+
+local function pizzaTick()
+    if not state.job.enabled then return end
+    local root = getRoot()
+    if not root then return end
+
+    local now = os.clock()
+    local found = pizzaScan(root.Position)
+    Pizza.detected = found
+
+    if #found == 0 then return end
+
+    local fired = 0
+    local maxPerTick = 8  -- fire multiple per tick for speed
+
+    for _, cand in ipairs(found) do
+        if fired >= maxPerTick then break end
+
+        -- blacklist check
+        local blocked, badword = pizzaInBlacklist(cand.text)
+        if blocked then
+            cand.skip = "svartlistad: " .. badword
+        else
+            -- keyword check (only in keyword mode)
+            if state.job.mode == "keyword" then
+                local matches, kw = pizzaMatchesKeyword(cand.text)
+                if not matches then
+                    cand.skip = "inget keyword"
+                    goto continue
+                end
+                cand.matchedKw = kw
+            end
+
+            -- cooldown check
+            local cd = Pizza.cooldowns[cand.inst]
+            if cd and now - cd < state.job.cooldown then
+                cand.skip = string.format("cooldown %.1fs", state.job.cooldown - (now - cd))
+            else
+                Pizza.cooldowns[cand.inst] = now
+                local ok = pizzaFireOne(cand)
+                cand.fireResult = ok and ("OK: " .. Pizza.stats.lastMethod) or ("FAIL: " .. Pizza.stats.lastMethod)
+                if ok then fired += 1 end
+            end
+        end
+        ::continue::
+    end
+
+    -- cleanup old cooldowns
+    if now - (Pizza.lastCleanup or 0) > 15 then
+        Pizza.lastCleanup = now
+        local kept = {}
+        for inst, t in pairs(Pizza.cooldowns) do
+            if now - t < 10 then kept[inst] = t end
+        end
+        Pizza.cooldowns = kept
+    end
 end
 
 --=====================================================================
--- INPUT (delad för drag + slider)
+-- INPUT (shared drag + slider)
 --=====================================================================
 local inputState = { drag = false, off = nil, slider = nil }
 
 local function bindSharedInput()
     track(UserInputService.InputChanged:Connect(function(i)
-        local isMove = i.UserInputType == Enum.UserInputType.MouseMovement
+        local move = i.UserInputType == Enum.UserInputType.MouseMovement
             or i.UserInputType == Enum.UserInputType.Touch
-        if not isMove then return end
-
+        if not move then return end
         if inputState.drag and inputState.off then
             local vp = viewport()
             local w = _G.__VeniceSpeedSuite
             if w and w.win then
                 w.win.Position = UDim2.new(0,
-                    math.clamp(i.Position.X - inputState.off.X, -420 + 80, vp.X - 80),
+                    math.clamp(i.Position.X - inputState.off.X, -340, vp.X - 80),
                     0, math.clamp(i.Position.Y - inputState.off.Y, 0, vp.Y - 40))
             end
             return
         end
-
         local s = inputState.slider
         if s and s.move then s.move(i.Position.X) end
     end))
-
     track(UserInputService.InputEnded:Connect(function(i)
         if i.UserInputType ~= Enum.UserInputType.MouseButton1
             and i.UserInputType ~= Enum.UserInputType.Touch then return end
@@ -386,9 +575,9 @@ local function bindSharedInput()
 end
 
 --=====================================================================
--- VEHICLE ENGINE
+-- VEHICLE  (kept intact from v1.8 - well tested)
 --=====================================================================
-local rig = { part = nil, att = nil, force = nil }
+local rig = {}
 local assist = {
     mode = "detect", timer = 0, lastSeat = nil, seats = {},
     applied = nil, writeTimer = 0, direct = false, probe = 0,
@@ -412,18 +601,15 @@ local function seatFromWeld(hum)
             end
         end
     end
-    return nil
 end
 
 local function getVehicle()
     local hum = getHumanoid()
     if not hum then return nil end
-
     local seat = nil
     pcall(function() seat = hum.SeatPart end)
     if not seat then seat = seatFromWeld(hum) end
     if not seat then return nil end
-
     local m = seat:FindFirstAncestorOfClass("Model")
     if not m then return nil end
     local d = 0
@@ -438,20 +624,18 @@ end
 local function pickPrimary(model, seat)
     local okR, ar = pcall(function() return seat.AssemblyRootPart end)
     if okR and ar and ar.Parent and not ar.Anchored
-        and not ar:IsA("Seat") and not ar:IsA("VehicleSeat") then
-        return ar
-    end
-    local best, bestScore = nil, -1
+        and not ar:IsA("Seat") and not ar:IsA("VehicleSeat") then return ar end
+    local best, bs = nil, -1
     for _, d in ipairs(model:GetDescendants()) do
         if d:IsA("BasePart") and not d.Anchored
             and not d:IsA("Seat") and not d:IsA("VehicleSeat") then
             local n = d.Name:lower()
-            local isWheel = n:find("wheel") or n:find("tire") or n:find("rim")
-            local score = d.AssemblyMass * (isWheel and 0.2 or 1)
-            if score > bestScore then best, bestScore = d, score end
+            local w = n:find("wheel") or n:find("tire") or n:find("rim")
+            local s = d.AssemblyMass * (w and 0.2 or 1)
+            if s > bs then best, bs = d, s end
         end
     end
-    return best or model.PrimaryPart or (okR and ar) or nil
+    return best or model.PrimaryPart
 end
 
 local function ensureRig(part)
@@ -467,17 +651,7 @@ local function ensureRig(part)
         }, part)
         rig.part, rig.att, rig.force = part, a, lv
     end)
-    return ok and rig.force ~= nil and rig.force.Parent ~= nil
-end
-
-local function cacheSeats(model)
-    table.clear(assist.seats)
-    for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("VehicleSeat") then
-            table.insert(assist.seats, d)
-            if #assist.seats >= 20 then break end  -- safety
-        end
-    end
+    return ok and rig.force ~= nil
 end
 
 local function resetAssist()
@@ -491,28 +665,27 @@ end
 
 local function tickVehicle(dt, notify)
     local model, seat = getVehicle()
-    local readout = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.vehicleReadout
+    local ro = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.vehicleReadout
 
     if not model then
         if assist.lastSeat ~= nil then resetAssist() end
-        if readout then pcall(readout, nil, 0) end
+        if ro then pcall(ro, nil, 0) end
         return
     end
 
     if assist.lastSeat ~= seat then
         assist.lastSeat = seat
         assist.mode, assist.timer = "detect", 0
-        assist.applied, assist.writeTimer = nil, 0
-        assist.direct, assist.probe = false, 0
+        assist.applied, assist.writeTimer, assist.direct, assist.probe = nil, 0, false, 0
         clearAssistRig()
-        cacheSeats(model)
+        table.clear(assist.seats)
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("VehicleSeat") then table.insert(assist.seats, d) end
+            if #assist.seats >= 20 then break end
+        end
         local okP, p = pcall(pickPrimary, model, seat)
         assist.primary = okP and p or nil
         assist.anchored = assist.primary ~= nil and assist.primary.Anchored
-        if assist.anchored and os.clock() - assist.lastNote > 3 then
-            assist.lastNote = os.clock()
-            notify("Bilen ar anchrad - fart gar ej att andra", "bad")
-        end
     end
 
     local primary = assist.primary
@@ -529,13 +702,12 @@ local function tickVehicle(dt, notify)
         if okV and typeof(v) == "Vector3" then vel = v end
     end
     local speed = vel.Magnitude
-    local method = assist.anchored and "anchrad"
-        or (assist.direct and "direkt" or "constraint")
+    local method = assist.anchored and "anchrad" or (assist.direct and "direkt" or "constraint")
     local info = string.format("metod: %s | %d saten", method, #assist.seats)
 
     if not state.vehicle.enabled then
         if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-        if readout then pcall(readout, model.Name, speed, nil, info) end
+        if ro then pcall(ro, model.Name, speed, nil, info) end
         return
     end
 
@@ -554,7 +726,7 @@ local function tickVehicle(dt, notify)
 
     if not state.vehicle.assist or not primary or assist.anchored then
         if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-        if readout then pcall(readout, model.Name, speed, nil, info) end
+        if ro then pcall(ro, model.Name, speed, nil, info) end
         return
     end
 
@@ -565,65 +737,40 @@ local function tickVehicle(dt, notify)
     end
 
     assist.timer += dt
-    if math.abs(thr) > 0.02 then
-        assist.mode = "throttle"
-    elseif assist.mode == "detect" and assist.timer > 1.2 then
-        assist.mode = "hold"
-    end
+    if math.abs(thr) > 0.02 then assist.mode = "throttle"
+    elseif assist.mode == "detect" and assist.timer > 1.2 then assist.mode = "hold" end
 
     local okF, fwd = pcall(function() return primary.CFrame.LookVector end)
     if not okF or typeof(fwd) ~= "Vector3" then
-        if readout then pcall(readout, model.Name, speed, nil, info) end
+        if ro then pcall(ro, model.Name, speed, nil, info) end
         return
     end
 
     local fs_ = vel:Dot(fwd)
-    local desired
-    if assist.mode == "throttle" then desired = thr * state.vehicle.maxSpeed
-    elseif fs_ > 0.05  then desired = state.vehicle.maxSpeed
-    elseif fs_ < -0.05 then desired = -state.vehicle.maxSpeed
-    else desired = 0 end
+    local desired = assist.mode == "throttle" and thr * state.vehicle.maxSpeed
+        or (fs_ > 0.05 and state.vehicle.maxSpeed
+        or fs_ < -0.05 and -state.vehicle.maxSpeed or 0)
 
     local inc = math.abs(desired) > math.abs(fs_)
     local rate = inc and state.vehicle.accel or state.vehicle.brake
     local step = math.clamp(desired - fs_, -rate * dt, rate * dt)
     local engaged = math.abs(step) > 0.01
 
-    if engaged and inc and not assist.direct then
-        if assist.probe == 0 then
-            assist.probe, assist.probeFrom = 0.0001, fs_
-        else
-            assist.probe += dt
-            if assist.probe > 1 then
-                if math.abs(fs_ - assist.probeFrom) < 2 then
-                    assist.direct = true
-                    notify("Assist: ingen effekt - byter metod", "bad")
-                end
-                assist.probe = 0
-            end
-        end
-    elseif not inc then
-        assist.probe = 0
-    end
-
     if not assist.direct and ensureRig(primary) then
         rig.force.LineDirection = fwd
         rig.force.LineVelocity  = fs_ + step
-        rig.force.MaxForce = engaged
-            and math.max(primary.AssemblyMass * rate * 2, 12000) or 0
-    else
-        if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-        if engaged then
-            local nv = fwd * (fs_ + step) + Vector3.new(0, vel.Y, 0)
-            pcall(function() primary.AssemblyLinearVelocity = nv end)
-        end
+        rig.force.MaxForce = engaged and math.max(primary.AssemblyMass * rate * 2, 12000) or 0
+    elseif engaged then
+        pcall(function()
+            primary.AssemblyLinearVelocity = fwd * (fs_ + step) + Vector3.new(0, vel.Y, 0)
+        end)
     end
 
-    if readout then pcall(readout, model.Name, speed, assist.mode, info) end
+    if ro then pcall(ro, model.Name, speed, assist.mode, info) end
 end
 
 --=====================================================================
--- PLAYER ENGINE
+-- PLAYER
 --=====================================================================
 local jumpForced = false
 
@@ -662,133 +809,25 @@ local function tickPlayer()
     else
         jumpForced = false
     end
-
-    local readout = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.playerReadout
-    if readout then pcall(readout, hum.WalkSpeed, lim) end
-end
-
---=====================================================================
--- PIZZA ENGINE (uses cache, zero workspace scanning)
---=====================================================================
-local pizzaState = {
-    actionCount = 0,
-    cooldowns   = {},    -- [instance] = os.clock() when fired
-    lastCleanup = 0,
-}
-
-local function cleanupCooldowns(now)
-    if now - pizzaState.lastCleanup < 10 then return end
-    pizzaState.lastCleanup = now
-    local kept = {}
-    for inst, t in pairs(pizzaState.cooldowns) do
-        if now - t < 5 then kept[inst] = t end
-    end
-    pizzaState.cooldowns = kept
-end
-
-local function tickPizza()
-    if not state.job.enabled then return end
-    local root = getRoot()
-    if not root then return end
-
-    local now = os.clock()
-    cleanupCooldowns(now)
-
-    local rootPos = root.Position
-    local radius  = state.job.radius
-    local radiusSq = radius * radius
-    local readout = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
-
-    -- Build a list of nearby candidates from cache
-    local candidates = {}
-    local cCount = 0
-    local maxCandidates = 80  -- safety ceiling
-
-    for prompt, info in pairs(Cache.prompts) do
-        if cCount >= maxCandidates then break end
-        if prompt.Parent and info.part and info.part.Parent and prompt.Enabled then
-            local offs = info.part.Position - rootPos
-            local distSq = offs.X*offs.X + offs.Y*offs.Y + offs.Z*offs.Z
-            if distSq <= radiusSq then
-                cCount += 1
-                candidates[cCount] = {
-                    type = "prompt", inst = prompt,
-                    text = info.text, distSq = distSq,
-                }
-            end
-        end
-    end
-    for cd, info in pairs(Cache.clicks) do
-        if cCount >= maxCandidates then break end
-        if cd.Parent and info.part and info.part.Parent then
-            local offs = info.part.Position - rootPos
-            local distSq = offs.X*offs.X + offs.Y*offs.Y + offs.Z*offs.Z
-            if distSq <= radiusSq then
-                cCount += 1
-                candidates[cCount] = {
-                    type = "click", inst = cd,
-                    text = info.text, distSq = distSq,
-                }
-            end
-        end
-    end
-
-    if cCount == 0 then
-        if readout then pcall(readout, "Inga prompts i narheten", false) end
-        return
-    end
-
-    table.sort(candidates, function(a, b) return a.distSq < b.distSq end)
-
-    -- Go through keywords in priority order
-    for _, kw in ipairs(state.job.keywords) do
-        for i = 1, cCount do
-            local cand = candidates[i]
-            if cand.text:find(kw, 1, true) then
-                local cd = pizzaState.cooldowns[cand.inst]
-                if not cd or now - cd >= 0.3 then
-                    local ok = cand.type == "prompt"
-                        and firePrompt(cand.inst)
-                        or  fireClick(cand.inst)
-                    if ok then
-                        pizzaState.cooldowns[cand.inst] = now
-                        pizzaState.actionCount += 1
-                        if readout then
-                            pcall(readout, string.format("%s  (#%d, %.1fm)",
-                                kw, pizzaState.actionCount, math.sqrt(cand.distSq)), true)
-                        end
-                    else
-                        if readout then pcall(readout, "Miss: " .. kw, false) end
-                    end
-                    return
-                end
-            end
-        end
-    end
-
-    if readout then
-        pcall(readout, string.format("%d prompts nara men inget keyword matchade", cCount), false)
-    end
+    local ro = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.playerReadout
+    if ro then pcall(ro, hum.WalkSpeed, lim) end
 end
 
 --=====================================================================
 -- GUI
 --=====================================================================
-local WIN_W, WIN_H = 420, 500
-
-local clearAssistRigRef
+local WIN_W, WIN_H = 460, 560
 local rebuild
 
 local function teardown()
     generation += 1
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     table.clear(connections)
-    if clearAssistRigRef then pcall(clearAssistRigRef) end
+    pcall(clearAssistRig)
     local r = _G.__VeniceSpeedSuite
     if r and r.gui then pcall(function() r.gui:Destroy() end) end
     _G.__VeniceSpeedSuite = nil
 end
-clearAssistRigRef = clearAssistRig
 
 local function buildFallback(err)
     pcall(function()
@@ -810,7 +849,7 @@ end
 
 local function buildGUI()
     local myGen = generation
-    log("building shell")
+    log("building gui")
 
     local gui = newInstance("ScreenGui", {
         Name = "VeniceSpeedSuite", ResetOnSpawn = false,
@@ -826,7 +865,7 @@ local function buildGUI()
 
     _G.__VeniceSpeedSuite = { gui = gui, win = win, teardown = teardown }
 
-    -- HEADER ---------------------------------------------------------
+    -- HEADER
     local header = newInstance("Frame", {
         Size = UDim2.new(1, 0, 0, 50),
         BackgroundColor3 = C.panel, BorderSizePixel = 0,
@@ -836,16 +875,15 @@ local function buildGUI()
         Size = UDim2.new(1, -100, 0, 18), Position = UDim2.new(0, 14, 0, 6),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         TextSize = 15, TextColor3 = C.text,
-        TextXAlignment = Enum.TextXAlignment.Left, Text = "Venice Speed Suite",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Venice Speed Suite",
     }, header)
-
     newInstance("TextLabel", {
         Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 24),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
         TextSize = 9, TextColor3 = C.dim,
         TextXAlignment = Enum.TextXAlignment.Left, Text = "v" .. VERSION,
     }, header)
-
     local status = newInstance("TextLabel", {
         Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 36),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
@@ -879,7 +917,6 @@ local function buildGUI()
     local minBtn   = hbtn("-", -64, C.dim)
     local closeBtn = hbtn("x", -34, C.bad)
 
-    -- DRAG -----------------------------------------------------------
     track(header.InputBegan:Connect(function(i)
         if i.UserInputType ~= Enum.UserInputType.MouseButton1
             and i.UserInputType ~= Enum.UserInputType.Touch then return end
@@ -887,7 +924,6 @@ local function buildGUI()
         inputState.off = Vector2.new(i.Position.X, i.Position.Y) - win.AbsolutePosition
     end))
 
-    -- TAB BAR --------------------------------------------------------
     local bar = newInstance("Frame", {
         Size = UDim2.new(1, -20, 0, 30), Position = UDim2.new(0, 10, 0, 54),
         BackgroundColor3 = C.panel, BorderSizePixel = 0,
@@ -906,7 +942,6 @@ local function buildGUI()
     }, win)
 
     local pages, tabs = {}, {}
-
     local function selectTab(name)
         for n, pg in pairs(pages) do
             pg.Visible = (n == name)
@@ -928,18 +963,16 @@ local function buildGUI()
         newInstance("UIPadding", {
             PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9),
         }, b)
-
         local p = newInstance("ScrollingFrame", {
-            Size = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1, BorderSizePixel = 0,
-            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
-            CanvasSize = UDim2.new(0, 0, 0, 760), Visible = false,
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            BorderSizePixel = 0, ScrollBarThickness = 3,
+            ScrollBarImageColor3 = C.track,
+            CanvasSize = UDim2.new(0, 0, 0, 900), Visible = false,
         }, content)
         newInstance("UIListLayout", {
             SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
         }, p)
         newInstance("UIPadding", { PaddingBottom = UDim.new(0, 12) }, p)
-
         pages[name], tabs[name] = p, b
         track(b.MouseButton1Click:Connect(function() selectTab(name) end))
         return p
@@ -948,10 +981,8 @@ local function buildGUI()
     local playerPage  = tab("Player", 1)
     local vehiclePage = tab("Vehicle", 2)
     local jobPage     = tab("Job", 3)
-    local playersPage = tab("Players", 4)
-    local settPage    = tab("Settings", 5)
+    local settPage    = tab("Settings", 4)
 
-    -- WIDGETS --------------------------------------------------------
     local function card(parent, h, order)
         local f = newInstance("Frame", {
             Size = UDim2.new(1, 0, 0, h),
@@ -960,7 +991,6 @@ local function buildGUI()
         newInstance("UICorner", { CornerRadius = UDim.new(0, 8) }, f)
         return f
     end
-
     local function label(parent, text, y, size, col)
         return newInstance("TextLabel", {
             Size = UDim2.new(1, -20, 0, 14),
@@ -977,33 +1007,26 @@ local function buildGUI()
             Position = UDim2.new(0, 10, 0, cfg.y),
             BackgroundTransparency = 1,
         }, parent)
-
         newInstance("TextLabel", {
-            Size = UDim2.new(1, -70, 0, 14),
-            BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-            TextSize = 11, TextColor3 = C.text,
+            Size = UDim2.new(1, -90, 0, 14), BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.text,
             TextXAlignment = Enum.TextXAlignment.Left, Text = cfg.label,
         }, row)
-
         local valLbl = newInstance("TextLabel", {
-            Size = UDim2.new(0, 70, 0, 14),
-            Position = UDim2.new(1, -70, 0, 0),
+            Size = UDim2.new(0, 90, 0, 14),
+            Position = UDim2.new(1, -90, 0, 0),
             BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
             TextSize = 11, TextColor3 = state.ui.accent,
             TextXAlignment = Enum.TextXAlignment.Right, Text = "",
         }, row)
-
         local trk = newInstance("Frame", {
-            Size = UDim2.new(1, 0, 0, 5),
-            Position = UDim2.new(0, 0, 0, 24),
+            Size = UDim2.new(1, 0, 0, 5), Position = UDim2.new(0, 0, 0, 24),
             BackgroundColor3 = C.track, BorderSizePixel = 0,
         }, row)
-
         local fill = newInstance("Frame", {
             Size = UDim2.new(0, 0, 1, 0),
             BackgroundColor3 = state.ui.accent, BorderSizePixel = 0,
         }, trk)
-
         local knob = newInstance("Frame", {
             Size = UDim2.new(0, 12, 0, 12),
             AnchorPoint = Vector2.new(0.5, 0.5),
@@ -1011,22 +1034,18 @@ local function buildGUI()
             BackgroundColor3 = Color3.new(1, 1, 1),
             BorderSizePixel = 0, ZIndex = 2,
         }, trk)
-
         local hit = newInstance("Frame", {
             Size = UDim2.new(1, 0, 0, 22),
             Position = UDim2.new(0, 0, 0.5, -11),
             BackgroundTransparency = 1, ZIndex = 3,
         }, trk)
-
         local v = math.clamp(cfg.value, cfg.min, cfg.max)
-
         local function render()
             local a = (v - cfg.min) / math.max(cfg.max - cfg.min, 1e-6)
             fill.Size = UDim2.new(a, 0, 1, 0)
             knob.Position = UDim2.new(a, 0, 0.5, 0)
             valLbl.Text = cfg.format and cfg.format(v) or tostring(v)
         end
-
         local function set(nv, fire)
             nv = math.clamp(math.floor(nv / cfg.step + 0.5) * cfg.step, cfg.min, cfg.max)
             if nv == v then return end
@@ -1034,21 +1053,18 @@ local function buildGUI()
             render()
             if fire and cfg.onChanged then cfg.onChanged(v) end
         end
-
         local function move(x)
             local w = trk.AbsoluteSize.X
             if w <= 0 then return end
-            local alpha = math.clamp((x - trk.AbsolutePosition.X) / w, 0, 1)
-            set(cfg.min + alpha * (cfg.max - cfg.min), true)
+            set(cfg.min + math.clamp((x - trk.AbsolutePosition.X) / w, 0, 1)
+                * (cfg.max - cfg.min), true)
         end
-
         track(hit.InputBegan:Connect(function(i)
             if i.UserInputType ~= Enum.UserInputType.MouseButton1
                 and i.UserInputType ~= Enum.UserInputType.Touch then return end
             inputState.slider = { move = move }
             move(i.Position.X)
         end))
-
         render()
         return { set = function(n) set(n, false) end }
     end
@@ -1059,54 +1075,50 @@ local function buildGUI()
             Position = UDim2.new(0, 10, 0, cfg.y),
             BackgroundTransparency = 1,
         }, parent)
-
         newInstance("TextLabel", {
             Size = UDim2.new(1, -60, 1, 0), BackgroundTransparency = 1,
             Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.text,
             TextXAlignment = Enum.TextXAlignment.Left, Text = cfg.label,
         }, row)
-
         local pill = newInstance("TextButton", {
             Size = UDim2.new(0, 36, 0, 18),
             Position = UDim2.new(1, -36, 0.5, -9),
             BackgroundColor3 = C.track, BorderSizePixel = 0,
             AutoButtonColor = false, Text = "",
         }, row)
-
         local dot = newInstance("Frame", {
             Size = UDim2.new(0, 12, 0, 12),
             Position = UDim2.new(0, 3, 0.5, -6),
             BackgroundColor3 = C.dim, BorderSizePixel = 0,
         }, pill)
-
         local on = cfg.value and true or false
         local function render()
             pill.BackgroundColor3 = on and state.ui.accent or C.track
-            dot.Position = on and UDim2.new(1, -15, 0.5, -6)
-                or UDim2.new(0, 3, 0.5, -6)
+            dot.Position = on and UDim2.new(1, -15, 0.5, -6) or UDim2.new(0, 3, 0.5, -6)
             dot.BackgroundColor3 = on and Color3.new(1, 1, 1) or C.dim
         end
         render()
-
         track(pill.MouseButton1Click:Connect(function()
             on = not on
             render()
-            if cfg.onChanged then
-                local ok, err = pcall(cfg.onChanged, on)
-                if not ok then notify(err, "bad") end
-            end
+            if cfg.onChanged then pcall(cfg.onChanged, on) end
         end))
+        return { set = function(v) on = v; render() end }
     end
 
     local function button(parent, cfg)
         local b = newInstance("TextButton", {
-            Size = UDim2.new(1, -20, 0, 28),
-            Position = UDim2.new(0, 10, 0, cfg.y),
-            BackgroundColor3 = cfg.danger and Color3.fromRGB(50, 27, 32) or C.track,
+            Size = cfg.size or UDim2.new(1, -20, 0, 28),
+            Position = UDim2.new(0, cfg.x or 10, 0, cfg.y),
+            BackgroundColor3 = cfg.danger and Color3.fromRGB(50, 27, 32)
+                or (cfg.primary and state.ui.accent or C.track),
             BorderSizePixel = 0, AutoButtonColor = false,
-            Font = Enum.Font.Gotham, TextSize = 11,
-            TextColor3 = cfg.danger and C.bad or C.text, Text = cfg.label,
+            Font = Enum.Font.GothamBold, TextSize = 10,
+            TextColor3 = cfg.danger and C.bad
+                or (cfg.primary and Color3.new(1,1,1) or C.text),
+            Text = cfg.label,
         }, parent)
+        newInstance("UICorner", { CornerRadius = UDim.new(0, 5) }, b)
         track(b.MouseButton1Click:Connect(function()
             if cfg.onClick then
                 local ok, e = pcall(cfg.onClick)
@@ -1116,8 +1128,9 @@ local function buildGUI()
         return b
     end
 
-    -- PLAYER PAGE ----------------------------------------------------
-    local speedSlider
+    --=================================================================
+    -- PLAYER PAGE
+    --=================================================================
     do
         local c = card(playerPage, 108, 1)
         label(c, "SPELARE", 8)
@@ -1126,17 +1139,15 @@ local function buildGUI()
             value = state.player.enabled,
             onChanged = function(v)
                 state.player.enabled = v; saveConfig()
-                notify(v and "Spelarjustering pa" or "Spelarjustering av",
-                    v and "good" or nil)
+                notify(v and "Spelarjustering pa" or "Spelarjustering av", v and "good" or nil)
             end,
         })
-        speedSlider = slider(c, {
+        local spd = slider(c, {
             label = "Ganghastighet", min = 16, max = 300, step = 1,
             value = state.player.speed, y = 54,
             format = function(x) return x .. " st/s" end,
             onChanged = function(x) state.player.speed = x; saveConfig() end,
         })
-
         local liveCard = card(playerPage, 32, 2)
         local live = label(liveCard, "16.0 st/s", 8, 13, C.text)
 
@@ -1157,7 +1168,7 @@ local function buildGUI()
             label = "Aterstall (16 / 50)", y = 10,
             onClick = function()
                 state.player.speed, state.player.jump = 16, 50
-                speedSlider.set(16); saveConfig()
+                spd.set(16); saveConfig()
                 local hum = getHumanoid()
                 if hum then pcall(function()
                     hum.WalkSpeed = 16
@@ -1177,7 +1188,9 @@ local function buildGUI()
         end
     end
 
-    -- VEHICLE PAGE ---------------------------------------------------
+    --=================================================================
+    -- VEHICLE PAGE
+    --=================================================================
     do
         local d = card(vehiclePage, 78, 1)
         label(d, "FORDON", 8)
@@ -1191,8 +1204,7 @@ local function buildGUI()
             value = state.vehicle.enabled,
             onChanged = function(v)
                 state.vehicle.enabled = v; saveConfig()
-                notify(v and "Fordonsjustering pa" or "Fordonsjustering av",
-                    v and "good" or nil)
+                notify(v and "Fordonsjustering pa" or "Fordonsjustering av", v and "good" or nil)
             end,
         })
         slider(c, {
@@ -1223,16 +1235,6 @@ local function buildGUI()
             end,
         })
 
-        local rc = card(vehiclePage, 48, 4)
-        button(rc, {
-            label = "Aterstall fordon", y = 10,
-            onClick = function()
-                state.vehicle.maxSpeed, state.vehicle.accel, state.vehicle.brake = 130, 110, 190
-                saveConfig()
-                rebuild()
-            end,
-        })
-
         _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, _, info)
             pcall(function()
                 detLbl.Text = name and ("I: " .. name) or "Inte i sate"
@@ -1245,294 +1247,269 @@ local function buildGUI()
         end
     end
 
-    -- JOB PAGE -------------------------------------------------------
+    --=================================================================
+    -- JOB PAGE (pizza auto-farm v3)
+    --=================================================================
+    local debugFrame, debugList
+    local modeAggBtn, modeKwBtn, statsLbl, cacheLbl
+
+    local function updateModeButtons()
+        pcall(function()
+            if state.job.mode == "aggressive" then
+                modeAggBtn.BackgroundColor3 = state.ui.accent
+                modeAggBtn.TextColor3 = Color3.new(1,1,1)
+                modeKwBtn.BackgroundColor3 = C.track
+                modeKwBtn.TextColor3 = C.text
+            else
+                modeKwBtn.BackgroundColor3 = state.ui.accent
+                modeKwBtn.TextColor3 = Color3.new(1,1,1)
+                modeAggBtn.BackgroundColor3 = C.track
+                modeAggBtn.TextColor3 = C.text
+            end
+        end)
+    end
+
     do
-        local c = card(jobPage, 130, 1)
+        -- Main controls
+        local c = card(jobPage, 150, 1)
         label(c, "PIZZA AUTO-FARM", 8)
+
         toggle(c, {
-            label = "Baka automatiskt", y = 24, value = state.job.enabled,
+            label = "Aktivera auto-farm", y = 24, value = state.job.enabled,
             onChanged = function(v)
                 state.job.enabled = v
-                if v then primeCache() end
-                pizzaState.actionCount = 0
+                if v then
+                    pizzaPrime()
+                    Pizza.stats.actions = 0
+                    Pizza.stats.failures = 0
+                    Pizza.stats.promptFires = 0
+                    Pizza.stats.clickFires = 0
+                end
                 saveConfig()
-                notify(v and "Auto-pizza PA - sta vid stationen" or "Auto-pizza av",
+                notify(v and "Auto-farm PA - sta vid stationen" or "Auto-farm av",
                     v and "good" or nil)
             end,
         })
-        slider(c, {
-            label = "Intervall (lagre = snabbare)",
-            min = 0.05, max = 2, step = 0.05,
-            value = state.job.interval, y = 54,
-            format = function(x) return string.format("%.2f s", x) end,
-            onChanged = function(x) state.job.interval = x; saveConfig() end,
+
+        label(c, "LAGE", 56)
+        modeAggBtn = button(c, {
+            label = "AGGRESSIVE (tryck allt)", x = 10, y = 70,
+            size = UDim2.new(0.5, -15, 0, 24),
+            onClick = function()
+                state.job.mode = "aggressive"; updateModeButtons(); saveConfig()
+                notify("Aggressive lage - trycker ALLT inom radien", "good")
+            end,
         })
+        modeKwBtn = button(c, {
+            label = "KEYWORD (filtrerat)",
+            x = 230, y = 70,
+            size = UDim2.new(0.5, -15, 0, 24),
+            onClick = function()
+                state.job.mode = "keyword"; updateModeButtons(); saveConfig()
+                notify("Keyword lage - bara matchande prompts", "good")
+            end,
+        })
+        updateModeButtons()
+
+        label(c, "", 100)
         slider(c, {
-            label = "Sokradie", min = 4, max = 60, step = 1,
-            value = state.job.radius, y = 94,
+            label = "Sokradie", min = 2, max = 80, step = 1,
+            value = state.job.radius, y = 108,
             format = function(x) return x .. " st" end,
             onChanged = function(x) state.job.radius = x; saveConfig() end,
         })
+    end
 
-        local sc = card(jobPage, 64, 2)
-        label(sc, "STATUS", 8)
-        local statusLbl = label(sc, "Vantar...", 24, 9, C.dim)
-        local countLbl = label(sc, "Aktioner: 0", 40, 9, C.dim)
+    do
+        local c = card(jobPage, 92, 2)
+        slider(c, {
+            label = "Intervall", min = 0.05, max = 2, step = 0.05,
+            value = state.job.interval, y = 8,
+            format = function(x) return string.format("%.2fs", x) end,
+            onChanged = function(x) state.job.interval = x; saveConfig() end,
+        })
+        slider(c, {
+            label = "Cooldown per prompt", min = 0.1, max = 10, step = 0.1,
+            value = state.job.cooldown, y = 48,
+            format = function(x) return string.format("%.1fs", x) end,
+            onChanged = function(x) state.job.cooldown = x; saveConfig() end,
+        })
+    end
 
-        _G.__VeniceSpeedSuite.jobReadout = function(txt, ok)
-            pcall(function()
-                statusLbl.Text = txt or ""
-                statusLbl.TextColor3 = ok and C.good or C.dim
-                countLbl.Text = string.format("Aktioner: %d  |  cache: %d prompts / %d clicks",
-                    pizzaState.actionCount, Cache.promptCount, Cache.clickCount)
-            end)
-        end
+    do
+        local c = card(jobPage, 90, 3)
+        toggle(c, {
+            label = "Tryck ProximityPrompts", y = 8, value = state.job.firePrompts,
+            onChanged = function(v) state.job.firePrompts = v; saveConfig() end,
+        })
+        toggle(c, {
+            label = "Tryck ClickDetectors", y = 32, value = state.job.fireClicks,
+            onChanged = function(v) state.job.fireClicks = v; saveConfig() end,
+        })
+        toggle(c, {
+            label = "Anvand svartlista (hoppar dorrar/sangar/osv)",
+            y = 56, value = state.job.useBlacklist,
+            onChanged = function(v) state.job.useBlacklist = v; saveConfig() end,
+        })
+    end
 
-        local kc = card(jobPage, 110, 3)
-        label(kc, "NYCKELORD (ordning = prioritet)", 8)
+    do
+        -- Stats card
+        local c = card(jobPage, 76, 4)
+        label(c, "STATISTIK", 8)
+        statsLbl = label(c, "0 aktioner | 0 prompts | 0 clicks", 24, 10, C.text)
+        cacheLbl = label(c, "cache: 0 prompts / 0 clicks", 40, 9, C.dim)
+        local lastLbl = label(c, "senaste: -", 56, 9, C.dim)
+        _G.__VeniceSpeedSuite.pizzaStatsLbls = { stats = statsLbl, cache = cacheLbl, last = lastLbl }
+    end
+
+    do
+        -- Action buttons
+        local c = card(jobPage, 76, 5)
+        button(c, {
+            label = "FORCE SCAN (ominitiera cache)", y = 8, primary = true,
+            onClick = function()
+                Pizza.cache.primed = false
+                Pizza.cache.prompts = {}
+                Pizza.cache.clicks = {}
+                Pizza.cache.promptCount = 0
+                Pizza.cache.clickCount = 0
+                pizzaPrime()
+                notify("Scannar om workspace...", "good")
+            end,
+        })
+        button(c, {
+            label = "Nollstall stats", x = 10, y = 42,
+            size = UDim2.new(0.5, -15, 0, 24),
+            onClick = function()
+                Pizza.stats.actions = 0
+                Pizza.stats.failures = 0
+                Pizza.stats.promptFires = 0
+                Pizza.stats.clickFires = 0
+                Pizza.cooldowns = {}
+                notify("Stats nollstalld", "good")
+            end,
+        })
+        button(c, {
+            label = "Tryck narmaste manuellt", x = 230, y = 42,
+            size = UDim2.new(0.5, -15, 0, 24),
+            onClick = function()
+                local root = getRoot()
+                if not root then return notify("Ingen karaktar", "bad") end
+                pizzaPrime()
+                task.wait(0.1)
+                local found = pizzaScan(root.Position)
+                if #found == 0 then return notify("Inga prompts i narheten", "bad") end
+                local ok = pizzaFireOne(found[1])
+                notify((ok and "OK: " or "FAIL: ") .. Pizza.stats.lastMethod .. " @ " .. found[1].display:sub(1, 30),
+                    ok and "good" or "bad")
+            end,
+        })
+    end
+
+    do
+        -- Debug list
+        local c = card(jobPage, 220, 6)
+        label(c, "DETEKTERADE INTERAKTIONER (live)", 8)
+        debugFrame = newInstance("ScrollingFrame", {
+            Size = UDim2.new(1, -20, 0, 192), Position = UDim2.new(0, 10, 0, 22),
+            BackgroundColor3 = C.panel, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
+            CanvasSize = UDim2.new(0, 0, 0, 192),
+        }, c)
+        newInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, debugFrame)
+        debugList = newInstance("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 1),
+        }, debugFrame)
+        newInstance("UIPadding", {
+            PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 6),
+            PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 4),
+        }, debugFrame)
+    end
+
+    do
+        -- Keyword editor
+        local c = card(jobPage, 90, 7)
+        label(c, "NYCKELORD (for keyword-lage)", 8)
         local kb = newInstance("TextBox", {
-            Size = UDim2.new(1, -20, 0, 64), Position = UDim2.new(0, 10, 0, 24),
+            Size = UDim2.new(1, -20, 0, 52), Position = UDim2.new(0, 10, 0, 24),
             BackgroundColor3 = C.panel, BorderSizePixel = 0,
             Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.text,
             TextWrapped = true, ClearTextOnFocus = false,
             TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Top,
             Text = table.concat(state.job.keywords, ", "),
-        }, kc)
+        }, c)
         newInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
         newInstance("UIPadding", {
             PaddingLeft = UDim.new(0, 6), PaddingTop = UDim.new(0, 4),
         }, kb)
-
         track(kb.FocusLost:Connect(function()
             local out = {}
             for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
                 if #w > 0 then table.insert(out, w) end
             end
             if #out > 0 then
-                state.job.keywords = out
-                saveConfig()
+                state.job.keywords = out; saveConfig()
                 notify(#out .. " nyckelord sparade", "good")
             end
         end))
+    end
 
-        local bc = card(jobPage, 80, 4)
-        button(bc, {
-            label = "Skanna cache nu (test)", y = 6,
-            onClick = function()
-                primeCache()
-                local root = getRoot()
-                if not root then return notify("Ingen karaktar", "bad") end
-                local found, radiusSq = 0, state.job.radius^2
-                local sample = {}
-                for prompt, info in pairs(Cache.prompts) do
-                    if prompt.Parent and info.part.Parent then
-                        local d = (info.part.Position - root.Position).Magnitude
-                        if d*d <= radiusSq then
-                            found += 1
-                            if #sample < 5 then
-                                table.insert(sample, string.format("[%.0fm] %s",
-                                    d, info.text:sub(1, 30)))
-                            end
-                        end
-                    end
-                end
-                notify(string.format("%d prompts inom %d st (av %d totalt)",
-                    found, state.job.radius, Cache.promptCount),
-                    found > 0 and "good" or "bad")
-                if #sample > 0 then
-                    statusLbl.Text = table.concat(sample, "\n")
-                    statusLbl.TextColor3 = C.text
-                end
-            end,
-        })
-        button(bc, {
-            label = "Nollstall raknare", y = 40,
-            onClick = function()
-                pizzaState.actionCount = 0
-                pizzaState.cooldowns = {}
-                notify("Raknare nollstalld", "good")
-            end,
-        })
+    do
+        -- Blacklist editor
+        local c = card(jobPage, 90, 8)
+        label(c, "SVARTLISTA (hoppas over, t.ex. 'door, sit, bed')", 8)
+        local kb = newInstance("TextBox", {
+            Size = UDim2.new(1, -20, 0, 52), Position = UDim2.new(0, 10, 0, 24),
+            BackgroundColor3 = C.panel, BorderSizePixel = 0,
+            Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.text,
+            TextWrapped = true, ClearTextOnFocus = false,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Text = table.concat(state.job.blacklist, ", "),
+        }, c)
+        newInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
+        newInstance("UIPadding", {
+            PaddingLeft = UDim.new(0, 6), PaddingTop = UDim.new(0, 4),
+        }, kb)
+        track(kb.FocusLost:Connect(function()
+            local out = {}
+            for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
+                if #w > 0 then table.insert(out, w) end
+            end
+            state.job.blacklist = out; saveConfig()
+            notify(#out .. " svartlistord sparade", "good")
+        end))
+    end
 
-        local nc = card(jobPage, 90, 5)
+    do
+        -- Guide
+        local c = card(jobPage, 100, 9)
         newInstance("TextLabel", {
-            Size = UDim2.new(1, -20, 1, -16),
-            Position = UDim2.new(0, 10, 0, 8),
+            Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham,
             TextSize = 9, TextWrapped = true, TextColor3 = C.dim,
             TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Top,
-            Text = "GUIDE: 1) Ta pizza-jobbet  2) Ga till stationen  "
-                .. "3) Sla pa 'Baka automatiskt'  4) Scriptet trycker prompts "
-                .. "i prioritetsordning. Sank intervallet for snabbare bakning. "
-                .. "Cachen byggs upp automatiskt - forsta skanningen tar nagra sekunder.",
-        }, nc)
+            Text = "GUIDE: 1) Ta ett jobb i Bloxburg (pizza/kassa/etc)  "
+                .. "2) Ga narmare stationen  3) Tryck FORCE SCAN om 'cache: 0'  "
+                .. "4) Sla pa auto-farm.  Debug-listan visar allt som detekteras - "
+                .. "ser du malen dar men inget hander? Tryck 'Tryck narmaste manuellt' "
+                .. "for att se vilken fire-metod som funkar. "
+                .. "Fungerar inte aggressive lage? Minska radien till 5-8 och sta mitt i stationen.",
+        }, c)
     end
 
-    -- PLAYERS PAGE ---------------------------------------------------
-    local selected, refreshPlayers = {}, nil
-    do
-        local c = card(playersPage, 140, 1)
-        label(c, "SERVER", 8)
-        local count = label(c, "-", 22, 10, C.dim)
-
-        local function sb(text, x, y, w, fn, danger)
-            local b = newInstance("TextButton", {
-                Size = UDim2.new(0, w, 0, 24), Position = UDim2.new(0, x, 0, y),
-                BackgroundColor3 = danger and Color3.fromRGB(50, 27, 32) or C.track,
-                BorderSizePixel = 0, AutoButtonColor = false,
-                Font = Enum.Font.Gotham, TextSize = 9,
-                TextColor3 = danger and C.bad or C.text, Text = text,
-            }, c)
-            track(b.MouseButton1Click:Connect(function()
-                local ok, e = pcall(fn)
-                if not ok then notify(e, "bad") end
-            end))
-        end
-
-        sb("Markera alla", 10, 40, 100, function()
-            table.clear(selected)
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LP then selected[p.UserId] = true end
-            end
-            if refreshPlayers then refreshPlayers() end
-        end)
-        sb("Rensa", 116, 40, 60, function()
-            table.clear(selected)
-            if refreshPlayers then refreshPlayers() end
-        end)
-        sb("Kick markerade", 182, 40, 110, function()
-            local n = 0
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LP and selected[p.UserId] then
-                    n += 1
-                    pcall(function() p:Kick("Kickad av Venice") end)
-                end
-            end
-            notify(n > 0 and ("Kick skickat till " .. n) or "Ingen markerad",
-                n > 0 and "good" or "bad")
-        end, true)
-        sb("Kick alla andra", 10, 76, 150, function()
-            local n = 0
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LP then
-                    n += 1
-                    pcall(function() p:Kick("Kickad av Venice") end)
-                end
-            end
-            notify(n > 0 and ("Kick skickat till " .. n) or "Ingen att kicka",
-                n > 0 and "good" or "bad")
-        end)
-
-        local lc = card(playersPage, 200, 2)
-        local list = newInstance("ScrollingFrame", {
-            Size = UDim2.new(1, -20, 0, 184), Position = UDim2.new(0, 10, 0, 8),
-            BackgroundTransparency = 1, BorderSizePixel = 0,
-            ScrollBarThickness = 3, ScrollBarImageColor3 = C.track,
-            CanvasSize = UDim2.new(0, 0, 0, 184),
-        }, lc)
-        newInstance("UIListLayout", {
-            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
-        }, list)
-
-        refreshPlayers = function()
-            for _, ch in ipairs(list:GetChildren()) do
-                if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
-            end
-            local all = Players:GetPlayers()
-            count.Text = string.format("%d i servern", #all)
-
-            local shown = 0
-            for _, p in ipairs(all) do
-                if p ~= LP then
-                    shown += 1
-                    local on = selected[p.UserId] and true or false
-                    local row = newInstance("Frame", {
-                        Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.panel,
-                        BorderSizePixel = 0, LayoutOrder = shown,
-                    }, list)
-
-                    local cb = newInstance("TextButton", {
-                        Size = UDim2.new(0, 14, 0, 14),
-                        Position = UDim2.new(0, 5, 0.5, -7),
-                        BackgroundColor3 = on and state.ui.accent or C.track,
-                        BorderSizePixel = 0, AutoButtonColor = false,
-                        Font = Enum.Font.GothamBold, TextSize = 9,
-                        TextColor3 = Color3.new(1, 1, 1), Text = on and "x" or "",
-                    }, row)
-                    track(cb.MouseButton1Click:Connect(function()
-                        selected[p.UserId] = (not selected[p.UserId]) or nil
-                        refreshPlayers()
-                    end))
-
-                    newInstance("TextLabel", {
-                        Size = UDim2.new(1, -86, 1, 0),
-                        Position = UDim2.new(0, 24, 0, 0),
-                        BackgroundTransparency = 1,
-                        Font = Enum.Font.Gotham, TextSize = 9,
-                        TextColor3 = C.text,
-                        TextXAlignment = Enum.TextXAlignment.Left,
-                        TextTruncate = Enum.TextTruncate.AtEnd, Text = p.Name,
-                    }, row)
-
-                    local kbb = newInstance("TextButton", {
-                        Size = UDim2.new(0, 42, 0, 16),
-                        Position = UDim2.new(1, -47, 0.5, -8),
-                        BackgroundColor3 = Color3.fromRGB(50, 27, 32),
-                        BorderSizePixel = 0, AutoButtonColor = false,
-                        Font = Enum.Font.GothamBold, TextSize = 8,
-                        TextColor3 = C.bad, Text = "kick",
-                    }, row)
-                    track(kbb.MouseButton1Click:Connect(function()
-                        pcall(function() p:Kick("Kickad av Venice") end)
-                        notify("Kick skickat till " .. p.Name, "good")
-                    end))
-                end
-            end
-
-            list.CanvasSize = UDim2.new(0, 0, 0, math.max(184, shown * 27 + 6))
-            if shown == 0 then
-                newInstance("TextLabel", {
-                    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
-                    Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.dim,
-                    TextXAlignment = Enum.TextXAlignment.Left,
-                    Text = "Ensam i servern.",
-                }, list)
-            end
-        end
-        refreshPlayers()
-
-        track(Players.PlayerAdded:Connect(function()
-            task.delay(0.5, function() pcall(refreshPlayers) end)
-        end))
-        track(Players.PlayerRemoving:Connect(function()
-            task.delay(0.5, function() pcall(refreshPlayers) end)
-        end))
-        track(tabs.Players.MouseButton1Click:Connect(function()
-            pcall(refreshPlayers)
-        end))
-
-        local nc = card(playersPage, 36, 3)
-        newInstance("TextLabel", {
-            Size = UDim2.new(1, -20, 1, -8), Position = UDim2.new(0, 10, 0, 4),
-            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-            TextColor3 = C.dim, TextWrapped = true,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Kick ar lokalt - servern kan lagga tillbaka dem.",
-        }, nc)
-    end
-
-    -- SETTINGS PAGE --------------------------------------------------
+    --=================================================================
+    -- SETTINGS PAGE
+    --=================================================================
     do
         local c = card(settPage, 100, 1)
         label(c, "FARTSGRANSER", 8)
         toggle(c, {
             label = "Tillampa granser", y = 22, value = state.limits.enabled,
-            onChanged = function(v)
-                state.limits.enabled = v; saveConfig()
-                notify(v and "Granser pa" or "Granser av", nil)
-            end,
+            onChanged = function(v) state.limits.enabled = v; saveConfig() end,
         })
         slider(c, {
             label = "Standardgrans", min = 16, max = 300, step = 1,
@@ -1550,7 +1527,6 @@ local function buildGUI()
             TextSize = 9, TextColor3 = C.text,
             TextXAlignment = Enum.TextXAlignment.Left, Text = "  Lagg zon har",
         }, zc)
-
         local function fld(x, ph, txt)
             return newInstance("TextBox", {
                 Size = UDim2.new(0, 58, 0, 24), Position = UDim2.new(1, x, 0, 22),
@@ -1561,7 +1537,6 @@ local function buildGUI()
         end
         local lb = fld(-132, "grans", "60")
         local rb = fld(-70, "radie", "45")
-
         local zlist = newInstance("ScrollingFrame", {
             Size = UDim2.new(1, -20, 0, 96), Position = UDim2.new(0, 10, 0, 54),
             BackgroundTransparency = 1, BorderSizePixel = 0,
@@ -1571,7 +1546,6 @@ local function buildGUI()
         newInstance("UIListLayout", {
             SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
         }, zlist)
-
         local function renderZones()
             for _, ch in ipairs(zlist:GetChildren()) do
                 if ch:IsA("Frame") or ch:IsA("TextLabel") then ch:Destroy() end
@@ -1597,8 +1571,7 @@ local function buildGUI()
                     TextSize = 9, TextColor3 = C.text,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     TextTruncate = Enum.TextTruncate.AtEnd,
-                    Text = string.format("%s | %dst/s",
-                        z.name or ("Zon " .. i), z.limit),
+                    Text = string.format("%s | %dst/s", z.name, z.limit),
                 }, row)
                 local del = newInstance("TextButton", {
                     Size = UDim2.new(0, 20, 0, 16),
@@ -1610,20 +1583,15 @@ local function buildGUI()
                 }, row)
                 track(del.MouseButton1Click:Connect(function()
                     table.remove(state.limits.zones, i)
-                    saveConfig()
-                    renderZones()
-                    notify("Zon borttagen", nil)
+                    saveConfig(); renderZones()
                 end))
             end
         end
         renderZones()
-
         track(add.MouseButton1Click:Connect(function()
             local root = getRoot()
             if not root then return notify("Ingen karaktar", "bad") end
-            if #state.limits.zones >= MAX_ZONES then
-                return notify("Zon-grans", "bad")
-            end
+            if #state.limits.zones >= MAX_ZONES then return notify("Zon-grans", "bad") end
             local rad = math.clamp(tonumber(rb.Text) or 45, 5, 500)
             local lim = math.clamp(tonumber(lb.Text) or 60, 5, 300)
             local p = root.Position
@@ -1665,11 +1633,10 @@ local function buildGUI()
         })
     end
 
-    -- CONTROLS (min/close/keybind) ----------------------------------
+    -- min/close
     do
         local minimized = false
         local expandedH = WIN_H
-
         track(minBtn.MouseButton1Click:Connect(function()
             minimized = not minimized
             minBtn.Text = minimized and "+" or "-"
@@ -1682,11 +1649,9 @@ local function buildGUI()
                 win.Size = UDim2.new(0, WIN_W, 0, expandedH)
             end
         end))
-
         local hidden = false
         track(closeBtn.MouseButton1Click:Connect(function()
-            hidden = true
-            win.Visible = false
+            hidden = true; win.Visible = false
             notify("Gomd | " .. state.ui.keybind.Name .. " visar", nil)
         end))
         track(UserInputService.InputBegan:Connect(function(i, processed)
@@ -1698,43 +1663,104 @@ local function buildGUI()
         end))
     end
 
-    -- MAIN LOOPS -----------------------------------------------------
+    --=================================================================
+    -- Debug list renderer
+    --=================================================================
+    local function renderDebug()
+        if not debugFrame or not debugFrame.Parent then return end
+        for _, ch in ipairs(debugFrame:GetChildren()) do
+            if ch:IsA("TextLabel") then ch:Destroy() end
+        end
+        local found = Pizza.detected
+        if #found == 0 then
+            newInstance("TextLabel", {
+                Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.dim,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Text = "Inget inom " .. state.job.radius .. " studs.",
+            }, debugFrame)
+        else
+            for i = 1, math.min(#found, 30) do
+                local cand = found[i]
+                local col = C.text
+                local suffix = ""
+                if cand.fireResult then
+                    if cand.fireResult:find("OK") then col = C.good
+                    else col = C.bad end
+                    suffix = "  <- " .. cand.fireResult
+                elseif cand.skip then
+                    col = C.dim
+                    suffix = "  (" .. cand.skip .. ")"
+                end
+                newInstance("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+                    Font = Enum.Font.Code, TextSize = 10, TextColor3 = col,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = i,
+                    Text = string.format("%.1fm  %s%s", cand.dist, cand.display, suffix),
+                }, debugFrame)
+            end
+            debugFrame.CanvasSize = UDim2.new(0, 0, 0, math.min(#found, 30) * 15 + 10)
+        end
+    end
+
+    local function updateStatsUI()
+        if not statsLbl then return end
+        pcall(function()
+            statsLbl.Text = string.format("%d aktioner | %d prompts | %d clicks | %d fails",
+                Pizza.stats.actions, Pizza.stats.promptFires,
+                Pizza.stats.clickFires, Pizza.stats.failures)
+            cacheLbl.Text = string.format("cache: %d prompts / %d clicks",
+                Pizza.cache.promptCount, Pizza.cache.clickCount)
+            local lastLbl = _G.__VeniceSpeedSuite.pizzaStatsLbls.last
+            if lastLbl then
+                if Pizza.stats.lastFireTime > 0 then
+                    lastLbl.Text = string.format("senaste: [%s] %s",
+                        Pizza.stats.lastMethod, Pizza.stats.lastTarget)
+                end
+            end
+        end)
+    end
+
+    --=================================================================
+    -- MAIN LOOPS
+    --=================================================================
     log("starting loops")
     selectTab("Player")
 
+    -- Vehicle + player @ 20Hz/15Hz
     task.spawn(function()
-        local vehAccum, playerAccum = 0, 0
-        local VEH_HZ, PLAYER_HZ = 1/20, 1/15   -- 20 Hz & 15 Hz
-
+        local vA, pA = 0, 0
         while gui.Parent and myGen == generation do
             local dt = task.wait()
             if type(dt) ~= "number" then dt = 1/60 end
+            vA += dt; pA += dt
+            if pA >= 1/15 then pA = 0; pcall(tickPlayer) end
+            if vA >= 1/20 then pcall(tickVehicle, vA, notify); vA = 0 end
+        end
+    end)
 
-            vehAccum    += dt
-            playerAccum += dt
-
-            if playerAccum >= PLAYER_HZ then
-                playerAccum = 0
-                pcall(tickPlayer)
-            end
-            if vehAccum >= VEH_HZ then
-                pcall(tickVehicle, vehAccum, notify)
-                vehAccum = 0
+    -- Pizza loop
+    task.spawn(function()
+        while gui.Parent and myGen == generation do
+            task.wait(math.max(state.job.interval, 0.05))
+            if state.job.enabled then
+                local ok, err = pcall(pizzaTick)
+                if not ok then
+                    warn("[Venice] pizzaTick: " .. tostring(err))
+                    task.wait(1)
+                end
             end
         end
     end)
 
-    -- Pizza runs on its own schedule
+    -- UI update loop (2 Hz)
     task.spawn(function()
         while gui.Parent and myGen == generation do
-            local wait = math.max(state.job.interval, 0.05)
-            task.wait(wait)
-            if state.job.enabled then
-                local ok, err = pcall(tickPizza)
-                if not ok then
-                    warn("[Venice] pizza: " .. tostring(err))
-                    task.wait(1)    -- backoff on error
-                end
+            task.wait(0.5)
+            if jobPage.Visible then
+                pcall(renderDebug)
+                pcall(updateStatsUI)
             end
         end
     end)
@@ -1742,11 +1768,11 @@ local function buildGUI()
     track(LP.CharacterAdded:Connect(function()
         task.wait(0.6)
         resetAssist()
-        pizzaState.cooldowns = {}
+        Pizza.cooldowns = {}
     end))
 
-    primeCache()   -- always prime so other features work smoothly
-    notify("Venice v" .. VERSION .. " | " .. state.ui.keybind.Name .. " visar/gommer", "good")
+    pizzaPrime()
+    notify("Venice v" .. VERSION .. " laddad - K visar/gommer", "good")
 end
 
 rebuild = function()
