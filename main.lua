@@ -1,12 +1,12 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v3.1  ·  Bloxburg
+  Venice Speed Suite  v3.2  ·  Bloxburg
   Author: Venice · MIT
   ---------------------------------------------------------------------
-  v3.1
-    · hookmetamethod letas i global och getgenv, installeras vid start
-    · reservväg utan hook: hittar kund genom att prova "Give"
-    · ärlig diagnos: skiljer på om funktionen finns och om den installerats
+  v3.2
+    · moduler letas i flera containrar och med flera identiteter, felet sparas
+    · reservväg: virtuella musklick på objektet om modulerna inte går att läsa
+    · diagnosen skrivs i en egen rad som inte skrivs över
   CLIENT-SIDE ONLY. Kicken är lokal.
 =====================================================================]]
 
@@ -15,6 +15,7 @@ local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService     = game:GetService("TweenService")
 local HttpService      = game:GetService("HttpService")
+local VirtualUser      = game:GetService("VirtualUser")
 
 local LP        = Players.LocalPlayer
 local PlayerGui = LP:WaitForChild("PlayerGui", 30)
@@ -38,7 +39,6 @@ end
 --=====================================================================
 local CONFIG_FILE = "VeniceSpeedSuite.json"
 local MAX_ZONES   = 40
-
 local INSIDE = CFrame.new(1169, 15, 273)
 local UNDER  = Vector3.new(1169, -45, 273)
 local JOB    = "PizzaPlanetDelivery"
@@ -71,7 +71,6 @@ local function loadConfig()
     if not ok or type(raw) ~= "string" or #raw < 2 then return end
     local ok2, d = pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok2 or type(d) ~= "table" then return end
-
     local p = d.player
     if type(p) == "table" then
         if type(p.enabled) == "boolean" then state.player.enabled = p.enabled end
@@ -156,7 +155,6 @@ loadConfig()
 --=====================================================================
 local connections = {}
 local function track(c) table.insert(connections, c); return c end
-
 local generation = 0
 local clearAssistRig
 local rebuild
@@ -246,27 +244,49 @@ local function bindSharedInput()
 end
 
 --=====================================================================
-local blox = { interaction = nil, job = nil, ui = nil, tried = false }
+local blox = { interaction = nil, job = nil, ui = nil, tried = false, err = "", via = "" }
+
+local function tryRequire(name)
+    local containers = {}
+    pcall(function()
+        local ps = LP:FindFirstChild("PlayerScripts")
+        if ps then
+            local m = ps:FindFirstChild("Modules")
+            if m then table.insert(containers, m) end
+            table.insert(containers, ps)
+        end
+    end)
+    pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        local m = rs:FindFirstChild("Modules")
+        if m then table.insert(containers, m) end
+    end)
+
+    for _, c in ipairs(containers) do
+        local mod = c:FindFirstChild(name)
+        if mod and mod:IsA("ModuleScript") then
+            for _, id in ipairs({ 2, 7, 8, 0 }) do
+                local ok, res = pcall(function()
+                    ident(id)
+                    local r = require(mod)
+                    ident(0)
+                    return r
+                end)
+                if ok and res ~= nil then return res end
+                if not ok then blox.err = tostring(res) end
+            end
+        end
+    end
+    if blox.err == "" then blox.err = name .. " hittades inte" end
+    return nil
+end
 
 local function initBlox()
     if blox.interaction then return true end
     if blox.tried then return blox.interaction ~= nil end
     blox.tried = true
-    local modules
-    if not pcall(function()
-        modules = LP:WaitForChild("PlayerScripts", 15):WaitForChild("Modules", 15)
-    end) or not modules then return false end
-
-    pcall(function()
-        ident(2)
-        blox.interaction = require(modules:WaitForChild("InteractionHandler", 10))
-        ident(0)
-    end)
-    pcall(function()
-        ident(2)
-        blox.job = require(modules:WaitForChild("JobHandler", 10))
-        ident(0)
-    end)
+    blox.interaction = tryRequire("InteractionHandler")
+    blox.job = tryRequire("JobHandler")
     return blox.interaction ~= nil
 end
 
@@ -275,6 +295,21 @@ local function getInteractUI()
     local ok, ui = pcall(function() return PlayerGui:WaitForChild("_interactUI", 2) end)
     if ok and ui then blox.ui = ui end
     return blox.ui
+end
+
+local function readButtons()
+    local ui = getInteractUI()
+    if not ui then return {} end
+    local out = {}
+    for _, v in ipairs(ui:GetDescendants()) do
+        if v:IsA("GuiButton") and v.Name == "Button" then
+            local lbl = v:FindFirstChild("TextLabel")
+            if lbl and lbl.Text ~= "" then
+                table.insert(out, { label = lbl.Text, sig = v.Activated })
+            end
+        end
+    end
+    return out
 end
 
 local function clickBtn(text)
@@ -290,23 +325,57 @@ local function clickBtn(text)
     return false
 end
 
+-- riktiga musklick, fungerar utan moduler
+local function virtualClick(part)
+    local cam = workspace.CurrentCamera
+    if not cam then return false end
+    local vp = cam.ViewportSize
+    local base = part.Position + Vector3.new(0, 1.5, 0)
+    local offsets = {
+        Vector3.new(0, 4, 9), Vector3.new(0, 2, 6),
+        Vector3.new(5, 2, 6), Vector3.new(-5, 2, 6), Vector3.new(0, 6, 12),
+    }
+    for _, off in ipairs(offsets) do
+        pcall(function() cam.CFrame = CFrame.lookAt(base + off, base) end)
+        task.wait(0.06)
+        local ok = pcall(function()
+            local c = Vector2.new(vp.X / 2, vp.Y / 2)
+            VirtualUser:Button1Down(c, cam.CFrame)
+            task.wait(0.04)
+            VirtualUser:Button1Up(c, cam.CFrame)
+        end)
+        if ok then
+            task.wait(0.1)
+            if #readButtons() > 0 then return true end
+        end
+    end
+    return false
+end
+
 local function quickInteract(model, text, part)
-    if not initBlox() then return false end
     local p = part or model.PrimaryPart or model:FindFirstChildOfClass("MeshPart")
         or model:FindFirstChildOfClass("BasePart")
     if not p then return false end
-    pcall(function()
-        ident(2)
-        blox.interaction:ShowMenu(model, p.Position, p)
-        ident(0)
-    end)
-    task.wait(0.05)
-    return clickBtn(text)
+
+    if initBlox() then
+        pcall(function()
+            ident(2)
+            blox.interaction:ShowMenu(model, p.Position, p)
+            ident(0)
+        end)
+        task.wait(0.06)
+        if clickBtn(text) then blox.via = "modul"; return true end
+    end
+
+    if virtualClick(p) then
+        if clickBtn(text) then blox.via = "klick"; return true end
+    end
+    return false
 end
 
 --=====================================================================
 local WIN_W, WIN_H = 430, 520
-local CANVAS = 700
+local CANVAS = 760
 
 local function buildGUI()
     local myGen = generation
@@ -324,7 +393,6 @@ local function buildGUI()
     }, gui)
     corner(win, 14)
     edge(win, C.edge, 0.05)
-
     _G.__VeniceSpeedSuite = { gui = gui, win = win, teardown = teardown }
 
     log("2 header")
@@ -356,7 +424,7 @@ local function buildGUI()
     new("TextLabel", {
         Size = UDim2.new(1, -110, 0, 12), Position = UDim2.new(0, 16, 0, 28),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "Bloxburg · v3.1",
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "Bloxburg · v3.2",
     }, header)
 
     local status = new("TextLabel", {
@@ -370,7 +438,7 @@ local function buildGUI()
         local s = tostring(text)
         status.Text = s
         status.TextColor3 = kind == "bad" and C.bad or kind == "good" and C.good or C.text
-        task.delay(3, function()
+        task.delay(8, function()
             if status.Parent and status.Text == s then status.Text = "" end
         end)
     end
@@ -384,12 +452,10 @@ local function buildGUI()
         corner(b, 7)
         local st = edge(b, C.edge, 0.3)
         track(b.MouseEnter:Connect(function()
-            tw(b, 0.1, { BackgroundColor3 = C.cardHi })
-            tw(st, 0.1, { Color = state.ui.accent })
+            tw(b, 0.1, { BackgroundColor3 = C.cardHi }); tw(st, 0.1, { Color = state.ui.accent })
         end))
         track(b.MouseLeave:Connect(function()
-            tw(b, 0.1, { BackgroundColor3 = C.card })
-            tw(st, 0.1, { Color = C.edge })
+            tw(b, 0.1, { BackgroundColor3 = C.card }); tw(st, 0.1, { Color = C.edge })
         end))
         return b
     end
@@ -793,7 +859,6 @@ local function buildGUI()
         local inc = math.abs(desired) > math.abs(fs)
         local rate = inc and state.vehicle.accel or state.vehicle.brake
         local step = math.clamp(desired - fs, -rate * dt, rate * dt)
-        local engaged = math.abs(step) > 0.01
         if not assist.direct and ensureRig(primary) then
             rig.force.LineDirection = fwd
             rig.force.LineVelocity = fs + step
@@ -810,7 +875,7 @@ local function buildGUI()
     local customer = nil
     local hooked = false
     local hookErr = ""
-    local jobStatus, jobCount
+    local jobStatus, jobCount, diagLabel
     local done = 0
     local jobRunning = false
 
@@ -818,6 +883,11 @@ local function buildGUI()
         if not jobStatus or not jobStatus.Parent then return end
         jobStatus.Text = txt
         jobStatus.TextColor3 = ok and C.good or C.bad
+    end
+
+    local function dset(txt)
+        if not diagLabel or not diagLabel.Parent then return end
+        diagLabel.Text = txt
     end
 
     local function locations()
@@ -862,10 +932,7 @@ local function buildGUI()
                 return old(...)
             end)
         end)
-        if not ok then
-            hookErr = tostring(e)
-            return false
-        end
+        if not ok then hookErr = tostring(e); return false end
         hooked = true
         return true
     end
@@ -906,10 +973,10 @@ local function buildGUI()
                 pcall(function()
                     char:PivotTo(CFrame.new(model.PrimaryPart.Position + Vector3.new(0, 4, 0)))
                 end)
-                task.wait(0.2)
+                task.wait(0.25)
             end
         end
-        for _ = 1, 12 do
+        for _ = 1, 10 do
             quickInteract(model, "Use")
             task.wait(0.25)
             if ourMoped() then break end
@@ -931,7 +998,6 @@ local function buildGUI()
         return false
     end
 
-    -- reserv utan hook: prova "Give" på kandidater
     local function giveProbe()
         local root = getRoot()
         if not root then return false end
@@ -955,10 +1021,10 @@ local function buildGUI()
             local char = LP.Character
             if char then
                 pcall(function() char:PivotTo(CFrame.new(c.part.Position + Vector3.new(0, 4, 0))) end)
-                task.wait(0.15)
+                task.wait(0.2)
             end
             quickInteract(c.model, "Give", c.part)
-            task.wait(0.2)
+            task.wait(0.25)
             if not hasBox() then
                 done += 1
                 if jobCount and jobCount.Parent then jobCount.Text = done .. " leveranser" end
@@ -979,7 +1045,7 @@ local function buildGUI()
     end
 
     local function cycle()
-        if not initBlox() then jset("Moduler saknas", false); return end
+        if not initBlox() then jset("Moduler saknas — kör Diagnos", false); return end
         local working = isWorking()
         if not working then
             if blox.job then
@@ -1012,7 +1078,7 @@ local function buildGUI()
 
         if not customer then
             jset("Ingen kund via hook — provar direkt", true)
-            if not giveProbe() then jset("Hittade ingen kund", false) end
+            giveProbe()
             pcall(function() moped:PivotTo(INSIDE) end)
             if root then pcall(function() root.Anchored = false end) end
             return
@@ -1210,8 +1276,7 @@ local function buildGUI()
             Size = UDim2.new(1, -24, 0, 34), Position = UDim2.new(0, 12, 0, 58),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Hämtar moped, tar låda, pivot till kund, ger pizzan, pivot "
-                .. "tillbaka. Utan hook provas kunder direkt.",
+            Text = "Modul först, virtuellt musklick som reserv om modulen inte går att läsa.",
         }, c)
         jobStatus = label(c, "redo", 96, 9, C.dim)
         jobCount = label(c, "0 leveranser", 112, 9, C.good)
@@ -1242,25 +1307,37 @@ local function buildGUI()
         button(wc, {
             label = "Diagnos", y = 82,
             onClick = function()
+                initBlox()
                 local hmm = hookFn()
                 local working, j = isWorking()
-                jset(string.format("hook-fn:%s · installerad:%s · interaktion:%s · jobb:%s",
-                    type(hmm) == "function" and "OK" or "NEJ",
-                    hooked and "OK" or "NEJ",
-                    blox.interaction and "OK" or "NEJ",
-                    tostring(j or "inget")),
-                    type(hmm) == "function" or blox.interaction ~= nil)
-                if hookErr ~= "" then notify("hook: " .. hookErr, "bad") end
+                local lines = {
+                    "hookmetamethod: " .. (type(hmm) == "function" and "finns" or "SAKNAS"),
+                    "hook installerad: " .. (hooked and "ja" or "nej"),
+                    "InteractionHandler: " .. (blox.interaction and "OK" or "SAKNAS"),
+                    "JobHandler: " .. (blox.job and "OK" or "SAKNAS"),
+                    "modulfel: " .. (blox.err ~= "" and blox.err:sub(1, 90) or "inget"),
+                    "jobb: " .. tostring(j or "inget") .. " · arbetar: " .. tostring(working),
+                }
+                dset(table.concat(lines, "\n"))
+                notify("Diagnos klar", "good")
             end,
         })
 
-        local nc = card(jobPage, 96, 3)
+        local dc = card(jobPage, 130, 3)
+        label(dc, "DIAGNOS", 10)
+        diagLabel = new("TextLabel", {
+            Size = UDim2.new(1, -24, 0, 100), Position = UDim2.new(0, 12, 0, 28),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+            TextWrapped = true, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, Text = "Tryck Diagnos.",
+        }, dc)
+
+        local nc = card(jobPage, 84, 4)
         new("TextLabel", {
             Size = UDim2.new(1, -24, 1, -18), Position = UDim2.new(0, 12, 0, 10),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Kör Diagnos först. Kräver leveransjobbet. 36 s per leverans är "
-                .. "spelets egen takt och går inte att skynda på.",
+            Text = "Kräver leveransjobbet. 36 s per leverans är spelets takt.",
         }, nc)
     end
 
@@ -1575,7 +1652,7 @@ local function buildGUI()
 
         installHook()
         tabs.Player.MouseButton1Click:Fire()
-        notify("Venice v3.1 · " .. state.ui.keybind.Name, "good")
+        notify("Venice v3.2 · " .. state.ui.keybind.Name, "good")
         if state.job.enabled then startJobLoop() end
     end)
 end
