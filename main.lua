@@ -1,13 +1,14 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.8  ·  Bloxburg
+  Venice Speed Suite  v1.9  ·  Bloxburg
   Author: Venice · MIT
   ---------------------------------------------------------------------
-  v1.8
-    · Jobb-fliken byggs sist, allt pizzarelaterat i pcall, fel syns i GUI
-    · reservskanner via GetDescendants om GetPartBoundsInRadius faller
-    · pizza: sekvensmotor med prioritet, cooldown per station och
-      automatisk gång fram till mål inom 60 studs
+  v1.9 — bygger på hur Bloxburg faktiskt fungerar, inte på antaganden:
+    · fordon hittas via "Vehicle_*"-barnet i karaktären
+    · interaktion via PlayerScripts.Modules.InteractionHandler:ShowMenu
+      + knappar i PlayerGui._interactUI (firesignal)
+    · jobb via PlayerScripts.Modules.JobHandler (GetJob / GoToWork)
+  Kräver executor med require, firesignal och setthreadidentity.
   CLIENT-SIDE ONLY. Kicken är lokal.
 =====================================================================]]
 
@@ -23,20 +24,35 @@ if not PlayerGui then return warn("[Venice] ingen PlayerGui") end
 local function log(m) print("[Venice] " .. m) end
 log("0 start")
 
+local function ident(n)
+    if setthreadidentity then pcall(setthreadidentity, n) end
+end
+
+local function fireSignal(sig)
+    if type(firesignal) == "function" then
+        return (pcall(firesignal, sig))
+    end
+    return (pcall(function() sig:Fire() end))
+end
+
 --=====================================================================
 local CONFIG_FILE = "VeniceSpeedSuite.json"
 local MAX_ZONES   = 40
 
 local DEFAULT_KEYWORDS = {
-    "dough", "sauce", "cheese", "topping", "oven", "bake",
-    "cut", "box", "serve", "deliver", "customer", "counter",
+    "dough", "deg", "sauce", "sås", "cheese", "ost", "topping",
+    "oven", "ugn", "bake", "grädda", "cut", "skär", "box", "låda",
+    "serve", "give", "counter", "disk",
 }
 
 local DEFAULTS = {
     player  = { enabled = false, speed = 34, jumpEnabled = false, jump = 50 },
     vehicle = { enabled = false, maxSpeed = 130, accel = 110, brake = 190, assist = true },
     limits  = { enabled = false, global = 110, zones = {} },
-    job     = { enabled = false, interval = 0.25, radius = 30, walk = true, keywords = DEFAULT_KEYWORDS },
+    job     = {
+        enabled = false, interval = 0.4, radius = 30, walk = true,
+        jobName = "PizzaPlanetDelivery", keywords = DEFAULT_KEYWORDS,
+    },
     ui      = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
 }
 
@@ -101,7 +117,8 @@ local function loadConfig()
     if type(j) == "table" then
         if type(j.enabled) == "boolean" then state.job.enabled = j.enabled end
         if type(j.walk) == "boolean" then state.job.walk = j.walk end
-        state.job.interval = num(j.interval, 0.25, 0.1, 3)
+        if type(j.jobName) == "string" then state.job.jobName = j.jobName end
+        state.job.interval = num(j.interval, 0.4, 0.15, 3)
         state.job.radius = num(j.radius, 30, 4, 60)
         if type(j.keywords) == "table" then
             local k = {}
@@ -229,7 +246,6 @@ local function bindSharedInput()
     track(UserInputService.InputChanged:Connect(function(i)
         if i.UserInputType ~= Enum.UserInputType.MouseMovement
             and i.UserInputType ~= Enum.UserInputType.Touch then return end
-
         if inputState.drag and inputState.off then
             local rec = _G.__VeniceSpeedSuite
             if rec and rec.win then
@@ -253,8 +269,69 @@ local function bindSharedInput()
 end
 
 --=====================================================================
+-- Bloxburg-moduler
+--=====================================================================
+local blox = { interaction = nil, job = nil, ui = nil }
+
+local function initBlox()
+    if blox.interaction then return true end
+    local ok = pcall(function()
+        local modules = LP:WaitForChild("PlayerScripts", 15):WaitForChild("Modules", 15)
+        ident(2)
+        blox.interaction = require(modules:WaitForChild("InteractionHandler", 15))
+        blox.job = require(modules:WaitForChild("JobHandler", 15))
+        ident(0)
+    end)
+    if not ok then log("kunde inte läsa Bloxburg-moduler") end
+    return ok and blox.interaction ~= nil
+end
+
+local function getInteractUI()
+    if blox.ui and blox.ui.Parent then return blox.ui end
+    local ok, ui = pcall(function() return PlayerGui:WaitForChild("_interactUI", 3) end)
+    if ok and ui then blox.ui = ui end
+    return blox.ui
+end
+
+local function showMenu(model, part)
+    if not initBlox() then return false end
+    local pos = part.Position
+    local ok = pcall(function()
+        ident(2)
+        blox.interaction:ShowMenu(model, pos, part)
+        ident(0)
+    end)
+    if ok then task.wait() end
+    return ok
+end
+
+local function readButtons()
+    local ui = getInteractUI()
+    if not ui then return {} end
+    local out = {}
+    for _, v in ipairs(ui:GetChildren()) do
+        local btn = v:FindFirstChild("Button")
+        if btn then
+            local lbl = btn:FindFirstChild("TextLabel")
+            if lbl and lbl.Text ~= "" then table.insert(out, { label = lbl.Text, sig = btn.Activated }) end
+        end
+    end
+    return out
+end
+
+local function pressButton(text)
+    for _, b in ipairs(readButtons()) do
+        if b.label == text then
+            fireSignal(b.sig)
+            return true
+        end
+    end
+    return false
+end
+
+--=====================================================================
 local WIN_W, WIN_H = 420, 500
-local CANVAS = 760
+local CANVAS = 900
 
 local function buildGUI()
     local myGen = generation
@@ -289,7 +366,7 @@ local function buildGUI()
     new("TextLabel", {
         Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 24),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "v1.8",
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "v1.9",
     }, header)
 
     local status = new("TextLabel", {
@@ -380,9 +457,9 @@ local function buildGUI()
 
     local playerPage  = tab("Player", 1)
     local vehiclePage = tab("Vehicle", 2)
-    local playersPage = tab("Players", 3)
-    local settPage    = tab("Settings", 4)
-    local jobPage     = tab("Job", 5)
+    local jobPage     = tab("Job", 3)
+    local playersPage = tab("Players", 4)
+    local settPage    = tab("Settings", 5)
 
     local function card(parent, h, order)
         local f = new("Frame", {
@@ -535,7 +612,7 @@ local function buildGUI()
     local assist = {
         mode = "detect", timer = 0, lastSeat = nil, seats = {},
         applied = nil, writeTimer = 0, direct = false, probe = 0,
-        probeFrom = 0, primary = nil, anchored = false, lastNote = 0, lastScan = 0,
+        probeFrom = 0, primary = nil, anchored = false, lastNote = 0,
     }
     local selected = {}
 
@@ -584,41 +661,29 @@ local function buildGUI()
         if u then u(hum.WalkSpeed, lim) end
     end
 
-    local function seatFromWeld(hum)
-        local char = hum.Parent
+    -- fordon: Bloxburg lägger ett "Vehicle_*"-barn i karaktären
+    local function vehicleFromCharacter()
+        local char = LP.Character
         if not char then return nil end
-        for _, d in ipairs(char:GetDescendants()) do
-            if d:IsA("Weld") or d:IsA("WeldConstraint") then
-                local other = d.Part1
-                if other and (other:IsA("Seat") or other:IsA("VehicleSeat")) then
-                    return other
-                end
+        for _, d in ipairs(char:GetChildren()) do
+            if d:IsA("Model") and d.Name:sub(1, 8) == "Vehicle_" then
+                return d
             end
         end
-        return nil
-    end
-
-    local function seatFromOccupant(hum)
-        local ok, res = pcall(function()
-            for _, d in ipairs(workspace:GetDescendants()) do
-                if d:IsA("VehicleSeat") and d.Occupant == hum then return d end
-            end
-        end)
-        if ok then return res end
         return nil
     end
 
     local function getVehicle()
         local hum = getHumanoid()
         if not hum then return nil end
-        local seat = hum.SeatPart
-        if not seat then seat = seatFromWeld(hum) end
-        if not seat and hum.Sit and os.clock() - assist.lastScan > 0.5 then
-            assist.lastScan = os.clock()
-            seat = seatFromOccupant(hum)
-        end
-        if not seat then return nil end
 
+        local model = vehicleFromCharacter()
+        if model then
+            return model, hum.SeatPart
+        end
+
+        local seat = hum.SeatPart
+        if not seat then return nil end
         local m = seat:FindFirstAncestorOfClass("Model")
         if not m then return nil end
         local d = 0
@@ -632,10 +697,12 @@ local function buildGUI()
     end
 
     local function pickPrimary(model, seat)
-        local okR, ar = pcall(function() return seat.AssemblyRootPart end)
-        if okR and ar and ar.Parent and not ar.Anchored
-            and not ar:IsA("Seat") and not ar:IsA("VehicleSeat") then
-            return ar
+        if seat then
+            local okR, ar = pcall(function() return seat.AssemblyRootPart end)
+            if okR and ar and ar.Parent and not ar.Anchored
+                and not ar:IsA("Seat") and not ar:IsA("VehicleSeat") then
+                return ar
+            end
         end
         local best, bs = nil, -1
         for _, d in ipairs(model:GetDescendants()) do
@@ -647,7 +714,7 @@ local function buildGUI()
                 if s > bs then best, bs = d, s end
             end
         end
-        return best or model.PrimaryPart or ar
+        return best or model.PrimaryPart
     end
 
     local function ensureRig(part)
@@ -686,13 +753,13 @@ local function buildGUI()
         local u = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.vehicleReadout
 
         if not model then
-            if assist.lastSeat ~= nil then resetAssist() end
+            if assist.lastSeat ~= nil or assist.primary ~= nil then resetAssist() end
             if u then u(nil, 0) end
             return
         end
 
-        if assist.lastSeat ~= seat then
-            assist.lastSeat = seat
+        if assist.lastSeat ~= model then
+            assist.lastSeat = model
             assist.mode, assist.timer = "detect", 0
             assist.applied, assist.writeTimer = nil, 0
             assist.direct, assist.probe = false, 0
@@ -750,7 +817,7 @@ local function buildGUI()
         end
 
         local thr = 0
-        if seat:IsA("VehicleSeat") then
+        if seat and seat:IsA("VehicleSeat") then
             local okT, r = pcall(function() return seat.ThrottleFloat end)
             if okT and type(r) == "number" then thr = r end
         end
@@ -809,11 +876,11 @@ local function buildGUI()
         if u then u(model.Name, speed, assist.mode, info) end
     end
 
-    -- pizza ---------------------------------------------------------
-    local jobStatus, jobCount
+    -- pizza via Bloxburgs interaktionsmodul -------------------------
+    local jobStatus, jobCount, jobJob
     local jobDone = 0
     local cooldown = {}
-    local lastTarget = nil
+    local stationCache = {}
 
     local function jset(txt, ok)
         if not jobStatus or not jobStatus.Parent then return end
@@ -821,82 +888,82 @@ local function buildGUI()
         jobStatus.TextColor3 = ok and C.good or C.bad
     end
 
-    local function firePrompt(p)
-        if type(fireproximityprompt) == "function" then
-            if pcall(fireproximityprompt, p) then return true end
-        end
-        return (pcall(function()
-            p:InputHoldBegin()
-            task.delay(math.max(p.HoldDuration, 0.05), function()
-                pcall(function() p:InputHoldEnd() end)
-            end)
-        end))
+    local function currentJobName()
+        if not initBlox() or not blox.job then return nil end
+        local ok, name = pcall(function()
+            ident(2)
+            local n = blox.job:GetJob()
+            ident(0)
+            return n
+        end)
+        if ok then return name end
+        return nil
     end
 
-    local function fireClick(cd)
-        if type(fireclickdetector) == "function" then
-            return (pcall(fireclickdetector, cd))
-        end
-        return false
-    end
-
-    local function scanRadius(radius)
+    local function nearbyParts(radius)
         local root = getRoot()
         if not root then return {} end
-
         local ok, parts = pcall(function()
             local params = OverlapParams.new()
             params.FilterType = Enum.RaycastFilterType.Exclude
             params.FilterDescendantsInstances = { LP.Character }
             return workspace:GetPartBoundsInRadius(root.Position, radius, params)
         end)
+        if ok and parts then return parts end
 
         local out = {}
-
-        if ok and parts then
-            for _, part in ipairs(parts) do
-                for _, ch in ipairs(part:GetChildren()) do
-                    if ch:IsA("ProximityPrompt") and ch.Enabled then
-                        table.insert(out, {
-                            prompt = ch, pos = part.Position,
-                            text = (ch.ActionText .. " " .. ch.ObjectText .. " " .. part.Name):lower(),
-                        })
-                    elseif ch:IsA("ClickDetector") then
-                        table.insert(out, { click = ch, pos = part.Position, text = part.Name:lower() })
-                    end
-                end
-            end
-            if #out > 0 then return out end
-        end
-
-        -- reserv: namnfiltrerad genomgång
-        local ok2 = pcall(function()
+        pcall(function()
             for _, d in ipairs(workspace:GetDescendants()) do
-                if #out > 24 then break end
-                if d:IsA("ProximityPrompt") and d.Enabled and d.Parent
-                    and d.Parent:IsA("BasePart") then
-                    local dist = (d.Parent.Position - root.Position).Magnitude
-                    if dist <= radius then
-                        table.insert(out, {
-                            prompt = d, pos = d.Parent.Position,
-                            text = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Parent.Name):lower(),
-                        })
-                    end
+                if #out > 60 then break end
+                if d:IsA("BasePart") and (d.Position - root.Position).Magnitude <= radius then
+                    table.insert(out, d)
                 end
             end
         end)
-
         return out
     end
 
-    local function pickMatch(found)
+    -- fråga stationen vilka knappar den erbjuder
+    local function probeStation(part)
+        local model = part.Parent
+        if not model then return nil end
+        if stationCache[model] then return stationCache[model] end
+
+        showMenu(model, part)
+        local buttons = readButtons()
+        if #buttons == 0 then return nil end
+
+        local entry = { model = model, part = part, buttons = buttons, text = (model.Name .. " " .. part.Name):lower() }
+        stationCache[model] = entry
+        return entry
+    end
+
+    local function scanStations(radius)
+        local out = {}
+        local seen = {}
+        for _, part in ipairs(nearbyParts(radius)) do
+            local model = part.Parent
+            if model and not seen[model] and model ~= LP.Character then
+                seen[model] = true
+                local e = probeStation(part)
+                if e then table.insert(out, e) end
+            end
+        end
+        return out
+    end
+
+    local function pickStation(stations)
         local now = os.clock()
         for _, kw in ipairs(state.job.keywords) do
             if (cooldown[kw] or 0) <= now then
-                for _, cand in ipairs(found) do
-                    if cand.text:find(kw, 1, true) then
-                        cand.kw = kw
-                        return cand
+                for _, st in ipairs(stations) do
+                    local hitText = st.text:find(kw, 1, true)
+                    local hitBtn = nil
+                    for _, b in ipairs(st.buttons) do
+                        if b.label:lower():find(kw, 1, true) then hitBtn = b; break end
+                    end
+                    if hitText or hitBtn then
+                        return st, hitBtn, kw
                     end
                 end
             end
@@ -909,38 +976,47 @@ local function buildGUI()
         local hum, root = getHumanoid(), getRoot()
         if not hum or not root then return jset("Ingen karaktär", false) end
         if hum.Health <= 0 then return end
-        if hum.SeatPart then return jset("Sitter i fordon", false) end
+        if vehicleFromCharacter() then return jset("Sitter i fordon", false) end
 
-        local found = scanRadius(state.job.radius)
-        if #found == 0 then
-            return jset("Inget inom " .. math.floor(state.job.radius) .. " st", false)
+        if not initBlox() then return jset("Kunde inte läsa InteractionHandler", false) end
+
+        local stations = scanStations(state.job.radius)
+        if #stations == 0 then
+            stationCache = {}
+            return jset("Inga stationer inom " .. math.floor(state.job.radius) .. " st", false)
         end
 
-        local target = pickMatch(found)
+        local st, btn, kw = pickStation(stations)
+        if not st then return jset(#stations .. " stationer, alla i vänteläge", true) end
+
+        local dist = (st.part.Position - root.Position).Magnitude
+        if dist > 8 and state.job.walk then
+            pcall(function() hum:MoveTo(st.part.Position) end)
+            return jset("Går till " .. kw .. string.format(" (%.0f st)", dist), true)
+        end
+
+        showMenu(st.model, st.part)
+        local buttons = readButtons()
+        if #buttons == 0 then
+            stationCache[st.model] = nil
+            return jset("Menyn tom på " .. kw, false)
+        end
+
+        local target = btn
         if not target then
-            return jset(string.format("%d träffar, alla i vänteläge", #found), true)
+            for _, b in ipairs(buttons) do
+                if b.label:lower():find(kw, 1, true) then target = b; break end
+            end
         end
+        target = target or buttons[1]
 
-        local dist = (target.pos - root.Position).Magnitude
-        if dist > 7 and state.job.walk then
-            pcall(function() hum:MoveTo(target.pos) end)
-            lastTarget = target.pos
-            return jset("Går till " .. target.kw .. string.format(" (%.0f st)", dist), true)
-        end
-
-        if lastTarget then
-            pcall(function() hum:MoveTo(root.Position) end)
-            lastTarget = nil
-        end
-
-        local ok = target.prompt and firePrompt(target.prompt) or fireClick(target.click)
-        if ok then
-            cooldown[target.kw] = os.clock() + 1.4
+        if fireSignal(target.sig) then
+            cooldown[kw] = os.clock() + 1.2
             jobDone += 1
             if jobCount and jobCount.Parent then jobCount.Text = jobDone .. " åtgärder" end
-            jset("Tryckte: " .. target.kw, true)
+            jset("Tryckte: " .. target.label .. " (" .. kw .. ")", true)
         else
-            jset("Misslyckades: " .. target.kw, false)
+            jset("Klick misslyckades: " .. target.label, false)
         end
     end
 
@@ -1010,7 +1086,7 @@ local function buildGUI()
         log("6 vehicle")
         local d = card(vehiclePage, 78, 1)
         label(d, "FORDON", 8)
-        detLabel = label(d, "Inte i säte", 24, 12, C.dim)
+        detLabel = label(d, "Inte i fordon", 24, 12, C.dim)
         spdLabel = label(d, "0.0 st/s", 42, 10, C.dim)
         infoLabel = label(d, "metod: —", 56, 9, C.dim)
 
@@ -1063,7 +1139,7 @@ local function buildGUI()
         })
 
         _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, _, info)
-            detLabel.Text = name and ("I: " .. name) or "Inte i säte"
+            detLabel.Text = name and ("I: " .. name) or "Inte i fordon"
             detLabel.TextColor3 = name and C.good or C.dim
             spdLabel.Text = string.format("%.1f st/s", speed)
             spdLabel.TextColor3 = speed > 0.5 and C.text or C.dim
@@ -1072,10 +1148,134 @@ local function buildGUI()
         end
     end
 
+    local function stageJob()
+        log("7 job")
+        local c = card(jobPage, 140, 1)
+        label(c, "PIZZABAK", 8)
+        toggle(c, {
+            label = "Baka automatiskt", y = 24, value = state.job.enabled,
+            onChanged = function(v)
+                state.job.enabled = v
+                saveConfig()
+                table.clear(cooldown)
+                stationCache = {}
+                notify(v and "Auto-pizza på" or "Auto-pizza av", v and "good" or nil)
+                if not v then jset("Avstängt", true) end
+            end,
+        })
+        toggle(c, {
+            label = "Gå fram själv", y = 52, value = state.job.walk,
+            onChanged = function(v) state.job.walk = v; saveConfig() end,
+        })
+        slider(c, {
+            label = "Intervall", min = 0.15, max = 3, step = 0.05,
+            value = state.job.interval, y = 82,
+            format = function(x) return string.format("%.2f s", x) end,
+            onChanged = function(x) state.job.interval = x; saveConfig() end,
+        })
+        jobJob = label(c, "jobb: —", 120, 9, C.dim)
+
+        local rc = card(jobPage, 84, 2)
+        slider(rc, {
+            label = "Sökradie", min = 6, max = 60, step = 1,
+            value = state.job.radius, y = 6,
+            format = function(x) return x .. " st" end,
+            onChanged = function(x) state.job.radius = x; saveConfig(); stationCache = {} end,
+        })
+        jobStatus = label(rc, "redo", 44, 9, C.dim)
+        jobCount = label(rc, "0 åtgärder", 58, 9, C.dim)
+
+        local wc = card(jobPage, 78, 3)
+        button(wc, {
+            label = "Börja jobba", y = 8,
+            onClick = function()
+                if not initBlox() then return notify("Moduler saknas", "bad") end
+                local ok, e = pcall(function()
+                    ident(2)
+                    blox.job:GoToWork(state.job.jobName)
+                    ident(0)
+                end)
+                notify(ok and ("Startar " .. state.job.jobName) or tostring(e), ok and "good" or "bad")
+            end,
+        })
+        button(wc, {
+            label = "Avsluta passet", y = 42,
+            onClick = function()
+                local btn = PlayerGui:FindFirstChild("MainGUI")
+                local sig
+                pcall(function()
+                    sig = btn.Bar.CharMenu.WorkFrame.WorkFrame.Action.Activated
+                end)
+                if sig then
+                    fireSignal(sig)
+                    notify("Avslutar", "good")
+                else
+                    notify("Hittade ingen avsluta-knapp", "bad")
+                end
+            end,
+        })
+
+        local kc = card(jobPage, 108, 4)
+        label(kc, "NYCKELORD · ORDNING = PRIORITET", 8)
+        local kb = new("TextBox", {
+            Size = UDim2.new(1, -20, 0, 58), Position = UDim2.new(0, 10, 0, 24),
+            BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
+            TextSize = 10, TextColor3 = C.text, TextWrapped = true,
+            ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
+        }, kc)
+        new("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
+
+        track(kb.FocusLost:Connect(function()
+            local out = {}
+            for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
+                if #w > 0 then table.insert(out, w) end
+            end
+            if #out > 0 then
+                state.job.keywords = out
+                table.clear(cooldown)
+                saveConfig()
+                notify(#out .. " nyckelord sparade", "good")
+            end
+        end))
+
+        local sc = card(jobPage, 48, 5)
+        button(sc, {
+            label = "Läs av stationer i närheten", y = 10,
+            onClick = function()
+                stationCache = {}
+                local stations = scanStations(state.job.radius)
+                notify(string.format("%d stationer hittade", #stations),
+                    #stations > 0 and "good" or "bad")
+                if #stations > 0 then
+                    local parts = {}
+                    for i = 1, math.min(4, #stations) do
+                        local names = {}
+                        for j = 1, math.min(2, #stations[i].buttons) do
+                            table.insert(names, stations[i].buttons[j].label)
+                        end
+                        table.insert(parts, stations[i].model.Name .. "[" .. table.concat(names, "/") .. "]")
+                    end
+                    jset(table.concat(parts, " | "), true)
+                end
+            end,
+        })
+
+        local nc = card(jobPage, 96, 6)
+        new("TextLabel", {
+            Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+            TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "Läser Bloxburgs egna interaktionsmeny istället för att gissa. "
+                .. "Tryck Läs av stationer först och se vilka namn och knappar som dyker "
+                .. "upp, skriv sedan nyckelord som matchar dem. Ligger nästa station "
+                .. "över 8 studs bort går karaktären dit. 1,2 s väntetid per station.",
+        }, nc)
+    end
+
     local refreshPlayers
 
     local function stagePlayers()
-        log("7 players")
+        log("8 players")
         local c = card(playersPage, 140, 1)
         label(c, "SERVER", 8)
         local count = label(c, "—", 22, 10, C.dim)
@@ -1211,7 +1411,7 @@ local function buildGUI()
     end
 
     local function stageSettings()
-        log("8 settings")
+        log("9 settings")
         local c = card(settPage, 100, 1)
         label(c, "FARTSGRÄNSER", 8)
         toggle(c, {
@@ -1348,98 +1548,6 @@ local function buildGUI()
         })
     end
 
-    local function stageJob()
-        log("9 job")
-        local c = card(jobPage, 130, 1)
-        label(c, "PIZZABAK", 8)
-        toggle(c, {
-            label = "Baka automatiskt", y = 24, value = state.job.enabled,
-            onChanged = function(v)
-                state.job.enabled = v
-                saveConfig()
-                table.clear(cooldown)
-                notify(v and "Auto-pizza på" or "Auto-pizza av", v and "good" or nil)
-                if not v then jset("Avstängt", true) end
-            end,
-        })
-        toggle(c, {
-            label = "Gå fram själv", y = 52, value = state.job.walk,
-            onChanged = function(v)
-                state.job.walk = v
-                saveConfig()
-                notify(v and "Går fram till stationer" or "Står still", nil)
-            end,
-        })
-        slider(c, {
-            label = "Intervall", min = 0.1, max = 3, step = 0.05,
-            value = state.job.interval, y = 82,
-            format = function(x) return string.format("%.2f s", x) end,
-            onChanged = function(x) state.job.interval = x; saveConfig() end,
-        })
-
-        local rc = card(jobPage, 78, 2)
-        slider(rc, {
-            label = "Sökradie", min = 4, max = 60, step = 1,
-            value = state.job.radius, y = 6,
-            format = function(x) return x .. " st" end,
-            onChanged = function(x) state.job.radius = x; saveConfig() end,
-        })
-        jobStatus = label(rc, "redo", 44, 9, C.dim)
-        jobCount = label(rc, "0 åtgärder", 58, 9, C.dim)
-
-        local kc = card(jobPage, 100, 3)
-        label(kc, "NYCKELORD · ORDNING = PRIORITET", 8)
-        local kb = new("TextBox", {
-            Size = UDim2.new(1, -20, 0, 56), Position = UDim2.new(0, 10, 0, 24),
-            BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
-            TextSize = 10, TextColor3 = C.text, TextWrapped = true,
-            ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
-        }, kc)
-        new("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
-
-        track(kb.FocusLost:Connect(function()
-            local out = {}
-            for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
-                if #w > 0 then table.insert(out, w) end
-            end
-            if #out > 0 then
-                state.job.keywords = out
-                table.clear(cooldown)
-                saveConfig()
-                notify(#out .. " nyckelord sparade", "good")
-            end
-        end))
-
-        local sc = card(jobPage, 48, 4)
-        button(sc, {
-            label = "Skanna nu", y = 10,
-            onClick = function()
-                local found = scanRadius(state.job.radius)
-                notify(string.format("%d träffar inom %d st", #found, state.job.radius),
-                    #found > 0 and "good" or "bad")
-                if #found > 0 then
-                    local names = {}
-                    for i = 1, math.min(4, #found) do
-                        table.insert(names, found[i].text:sub(1, 18))
-                    end
-                    jset(table.concat(names, " | "), true)
-                end
-            end,
-        })
-
-        local nc = card(jobPage, 96, 5)
-        new("TextLabel", {
-            Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
-            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-            TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Ställ dig vid pizzastationen och slå på. Ligger nästa station mer än "
-                .. "7 studs bort går karaktären dit själv. Varje station får 1,4 s "
-                .. "väntetid innan den används igen, så kedjan deg → sås → ost → ugn "
-                .. "→ skär → låda inte spammar samma knapp. Fungerar bara om stationen "
-                .. "har ProximityPrompt eller ClickDetector — tryck Skanna nu först.",
-        }, nc)
-    end
-
     local function stageControls()
         log("10 controls")
         local min = false
@@ -1477,7 +1585,7 @@ local function buildGUI()
 
     task.spawn(function()
         local stages = {
-            stagePlayer, stageVehicle, stagePlayers, stageSettings, stageControls, stageJob,
+            stagePlayer, stageVehicle, stageJob, stagePlayers, stageSettings, stageControls,
         }
         for i, fn in ipairs(stages) do
             if myGen ~= generation then return end
@@ -1502,13 +1610,20 @@ local function buildGUI()
         end))
 
         task.spawn(function()
+            local tickCount = 0
             while gui.Parent do
-                local iv = 0.25
-                pcall(function() iv = math.max(tonumber(state.job.interval) or 0.25, 0.1) end)
+                local iv = 0.4
+                pcall(function() iv = math.max(tonumber(state.job.interval) or 0.4, 0.15) end)
                 task.wait(iv)
+                tickCount += 1
                 if state.job.enabled then
                     local ok, e = pcall(pizzaStep)
                     if not ok then jset("Pizza-fel: " .. tostring(e), false) end
+                end
+                if tickCount % 8 == 0 and jobJob and jobJob.Parent then
+                    local n = currentJobName()
+                    jobJob.Text = "jobb: " .. (n or "inget")
+                    jobJob.TextColor3 = n and C.good or C.dim
                 end
             end
         end)
@@ -1516,10 +1631,11 @@ local function buildGUI()
         track(LP.CharacterAdded:Connect(function()
             task.wait(0.6)
             resetAssist()
+            stationCache = {}
         end))
 
         tabs.Player.MouseButton1Click:Fire()
-        notify("Venice v1.8 · " .. state.ui.keybind.Name .. " visar", "good")
+        notify("Venice v1.9 · " .. state.ui.keybind.Name .. " visar", "good")
         log("12 klar")
     end)
 end
