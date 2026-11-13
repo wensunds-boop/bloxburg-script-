@@ -1,15 +1,14 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v1.7  ·  Bloxburg  ·  lättversion
+  Venice Speed Suite  v1.8  ·  Bloxburg
   Author: Venice · MIT
   ---------------------------------------------------------------------
-  v1.7
-    · all klickhantering delar tre globala lyssnare istället för en per reglage
-    · fordonsdetektion: SeatPart, sedan SeatWeld i karaktären, sedan
-      skanning efter VehicleSeat med dig som Occupant
-    · ny Jobb-flik: automatisk pizza via ProximityPrompt/ClickDetector
-  CLIENT-SIDE ONLY. Kicken är lokal. Pizzaläget är nyckelordsdrivet och
-  behöver trimmas mot det som faktiskt står i Bloxburg.
+  v1.8
+    · Jobb-fliken byggs sist, allt pizzarelaterat i pcall, fel syns i GUI
+    · reservskanner via GetDescendants om GetPartBoundsInRadius faller
+    · pizza: sekvensmotor med prioritet, cooldown per station och
+      automatisk gång fram till mål inom 60 studs
+  CLIENT-SIDE ONLY. Kicken är lokal.
 =====================================================================]]
 
 local Players          = game:GetService("Players")
@@ -22,20 +21,22 @@ local PlayerGui = LP:WaitForChild("PlayerGui", 30)
 if not PlayerGui then return warn("[Venice] ingen PlayerGui") end
 
 local function log(m) print("[Venice] " .. m) end
+log("0 start")
 
 --=====================================================================
 local CONFIG_FILE = "VeniceSpeedSuite.json"
 local MAX_ZONES   = 40
 
 local DEFAULT_KEYWORDS = {
-    "dough", "sauce", "cheese", "topping", "oven", "bake", "cut", "box", "order",
+    "dough", "sauce", "cheese", "topping", "oven", "bake",
+    "cut", "box", "serve", "deliver", "customer", "counter",
 }
 
 local DEFAULTS = {
     player  = { enabled = false, speed = 34, jumpEnabled = false, jump = 50 },
     vehicle = { enabled = false, maxSpeed = 130, accel = 110, brake = 190, assist = true },
     limits  = { enabled = false, global = 110, zones = {} },
-    job     = { enabled = false, interval = 0.25, radius = 18, keywords = DEFAULT_KEYWORDS },
+    job     = { enabled = false, interval = 0.25, radius = 30, walk = true, keywords = DEFAULT_KEYWORDS },
     ui      = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
 }
 
@@ -99,8 +100,9 @@ local function loadConfig()
     local j = d.job
     if type(j) == "table" then
         if type(j.enabled) == "boolean" then state.job.enabled = j.enabled end
+        if type(j.walk) == "boolean" then state.job.walk = j.walk end
         state.job.interval = num(j.interval, 0.25, 0.1, 3)
-        state.job.radius = num(j.radius, 18, 4, 60)
+        state.job.radius = num(j.radius, 30, 4, 60)
         if type(j.keywords) == "table" then
             local k = {}
             for _, w in ipairs(j.keywords) do
@@ -208,7 +210,7 @@ local function buildFallback(err)
     pcall(function()
         local g = new("ScreenGui", { ResetOnSpawn = false }, PlayerGui)
         local f = new("Frame", {
-            Size = UDim2.new(0, 320, 0, 80), Position = UDim2.new(0.5, -160, 0.5, -40),
+            Size = UDim2.new(0, 340, 0, 90), Position = UDim2.new(0.5, -170, 0.5, -45),
             BackgroundColor3 = C.panel, BorderSizePixel = 0,
         }, g)
         new("TextLabel", {
@@ -221,35 +223,32 @@ local function buildFallback(err)
 end
 
 --=====================================================================
--- delad inmatning
---=====================================================================
 local inputState = { drag = false, off = nil, slider = nil }
 
 local function bindSharedInput()
     track(UserInputService.InputChanged:Connect(function(i)
-        local isMove = i.UserInputType == Enum.UserInputType.MouseMovement
-            or i.UserInputType == Enum.UserInputType.Touch
-        if not isMove then return end
+        if i.UserInputType ~= Enum.UserInputType.MouseMovement
+            and i.UserInputType ~= Enum.UserInputType.Touch then return end
 
         if inputState.drag and inputState.off then
-            local vp = viewport()
-            local w = _G.__VeniceSpeedSuite
-            if w and w.win then
-                w.win.Position = UDim2.new(0,
-                    math.clamp(i.Position.X - inputState.off.X, -420 + 80, vp.X - 80),
+            local rec = _G.__VeniceSpeedSuite
+            if rec and rec.win then
+                local vp = viewport()
+                rec.win.Position = UDim2.new(0,
+                    math.clamp(i.Position.X - inputState.off.X, -340, vp.X - 80),
                     0, math.clamp(i.Position.Y - inputState.off.Y, 0, vp.Y - 40))
             end
             return
         end
-
         local s = inputState.slider
         if s then s.move(i.Position.X) end
     end))
 
     track(UserInputService.InputEnded:Connect(function(i)
-        if i.UserInputType ~= Enum.UserInputType.MouseButton1
-            and i.UserInputType ~= Enum.UserInputType.Touch then return end
-        inputState.drag, inputState.slider = false, nil
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            inputState.drag, inputState.slider = false, nil
+        end
     end))
 end
 
@@ -290,7 +289,7 @@ local function buildGUI()
     new("TextLabel", {
         Size = UDim2.new(1, -100, 0, 12), Position = UDim2.new(0, 14, 0, 24),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "v1.7",
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "v1.8",
     }, header)
 
     local status = new("TextLabel", {
@@ -347,12 +346,11 @@ local function buildGUI()
 
     local pages, tabs = {}, {}
 
-    local function tab(name, order, short)
+    local function tab(name, order)
         local b = new("TextButton", {
-            Size = UDim2.new(0, #(short or name) * 6 + 20, 1, -8),
-            BackgroundColor3 = C.panel, BorderSizePixel = 0, AutoButtonColor = false,
-            LayoutOrder = order, Font = Enum.Font.Gotham, TextSize = 10,
-            TextColor3 = C.dim, Text = short or name,
+            Size = UDim2.new(0, #name * 6 + 20, 1, -8), BackgroundColor3 = C.panel,
+            BorderSizePixel = 0, AutoButtonColor = false, LayoutOrder = order,
+            Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.dim, Text = name,
         }, bar)
         new("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9) }, b)
 
@@ -382,11 +380,10 @@ local function buildGUI()
 
     local playerPage  = tab("Player", 1)
     local vehiclePage = tab("Vehicle", 2)
-    local jobPage     = tab("Job", 3)
-    local playersPage = tab("Players", 4)
-    local settPage    = tab("Settings", 5)
+    local playersPage = tab("Players", 3)
+    local settPage    = tab("Settings", 4)
+    local jobPage     = tab("Job", 5)
 
-    -- widgets -------------------------------------------------------
     local function card(parent, h, order)
         local f = new("Frame", {
             Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.card,
@@ -614,7 +611,6 @@ local function buildGUI()
     local function getVehicle()
         local hum = getHumanoid()
         if not hum then return nil end
-
         local seat = hum.SeatPart
         if not seat then seat = seatFromWeld(hum) end
         if not seat and hum.Sit and os.clock() - assist.lastScan > 0.5 then
@@ -814,10 +810,20 @@ local function buildGUI()
     end
 
     -- pizza ---------------------------------------------------------
+    local jobStatus, jobCount
+    local jobDone = 0
+    local cooldown = {}
+    local lastTarget = nil
+
+    local function jset(txt, ok)
+        if not jobStatus or not jobStatus.Parent then return end
+        jobStatus.Text = txt
+        jobStatus.TextColor3 = ok and C.good or C.bad
+    end
+
     local function firePrompt(p)
         if type(fireproximityprompt) == "function" then
-            local ok = pcall(fireproximityprompt, p)
-            if ok then return true end
+            if pcall(fireproximityprompt, p) then return true end
         end
         return (pcall(function()
             p:InputHoldBegin()
@@ -834,48 +840,107 @@ local function buildGUI()
         return false
     end
 
-    local function scanNearby(radius)
+    local function scanRadius(radius)
         local root = getRoot()
         if not root then return {} end
-        local params = OverlapParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { LP.Character }
 
         local ok, parts = pcall(function()
+            local params = OverlapParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = { LP.Character }
             return workspace:GetPartBoundsInRadius(root.Position, radius, params)
         end)
-        if not ok or not parts then return {} end
 
-        local found = {}
-        for _, part in ipairs(parts) do
-            for _, ch in ipairs(part:GetChildren()) do
-                if ch:IsA("ProximityPrompt") and ch.Enabled then
-                    table.insert(found, {
-                        prompt = ch,
-                        text = (ch.ActionText .. " " .. ch.ObjectText .. " " .. part.Name):lower(),
-                    })
-                elseif ch:IsA("ClickDetector") then
-                    table.insert(found, { click = ch, text = part.Name:lower() })
+        local out = {}
+
+        if ok and parts then
+            for _, part in ipairs(parts) do
+                for _, ch in ipairs(part:GetChildren()) do
+                    if ch:IsA("ProximityPrompt") and ch.Enabled then
+                        table.insert(out, {
+                            prompt = ch, pos = part.Position,
+                            text = (ch.ActionText .. " " .. ch.ObjectText .. " " .. part.Name):lower(),
+                        })
+                    elseif ch:IsA("ClickDetector") then
+                        table.insert(out, { click = ch, pos = part.Position, text = part.Name:lower() })
+                    end
+                end
+            end
+            if #out > 0 then return out end
+        end
+
+        -- reserv: namnfiltrerad genomgång
+        local ok2 = pcall(function()
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if #out > 24 then break end
+                if d:IsA("ProximityPrompt") and d.Enabled and d.Parent
+                    and d.Parent:IsA("BasePart") then
+                    local dist = (d.Parent.Position - root.Position).Magnitude
+                    if dist <= radius then
+                        table.insert(out, {
+                            prompt = d, pos = d.Parent.Position,
+                            text = (d.ActionText .. " " .. d.ObjectText .. " " .. d.Parent.Name):lower(),
+                        })
+                    end
+                end
+            end
+        end)
+
+        return out
+    end
+
+    local function pickMatch(found)
+        local now = os.clock()
+        for _, kw in ipairs(state.job.keywords) do
+            if (cooldown[kw] or 0) <= now then
+                for _, cand in ipairs(found) do
+                    if cand.text:find(kw, 1, true) then
+                        cand.kw = kw
+                        return cand
+                    end
                 end
             end
         end
-        return found
+        return nil
     end
 
     local function pizzaStep()
         if not state.job.enabled then return end
-        local found = scanNearby(state.job.radius)
-        if #found == 0 then return end
+        local hum, root = getHumanoid(), getRoot()
+        if not hum or not root then return jset("Ingen karaktär", false) end
+        if hum.Health <= 0 then return end
+        if hum.SeatPart then return jset("Sitter i fordon", false) end
 
-        for _, kw in ipairs(state.job.keywords) do
-            for _, cand in ipairs(found) do
-                if cand.text:find(kw, 1, true) then
-                    local ok = cand.prompt and firePrompt(cand.prompt) or fireClick(cand.click)
-                    local j = _G.__VeniceSpeedSuite and _G.__VeniceSpeedSuite.jobReadout
-                    if j then j(ok and ("Tryckte: " .. kw) or ("Misslyckades: " .. kw), ok) end
-                    return
-                end
-            end
+        local found = scanRadius(state.job.radius)
+        if #found == 0 then
+            return jset("Inget inom " .. math.floor(state.job.radius) .. " st", false)
+        end
+
+        local target = pickMatch(found)
+        if not target then
+            return jset(string.format("%d träffar, alla i vänteläge", #found), true)
+        end
+
+        local dist = (target.pos - root.Position).Magnitude
+        if dist > 7 and state.job.walk then
+            pcall(function() hum:MoveTo(target.pos) end)
+            lastTarget = target.pos
+            return jset("Går till " .. target.kw .. string.format(" (%.0f st)", dist), true)
+        end
+
+        if lastTarget then
+            pcall(function() hum:MoveTo(root.Position) end)
+            lastTarget = nil
+        end
+
+        local ok = target.prompt and firePrompt(target.prompt) or fireClick(target.click)
+        if ok then
+            cooldown[target.kw] = os.clock() + 1.4
+            jobDone += 1
+            if jobCount and jobCount.Parent then jobCount.Text = jobDone .. " åtgärder" end
+            jset("Tryckte: " .. target.kw, true)
+        else
+            jset("Misslyckades: " .. target.kw, false)
         end
     end
 
@@ -1007,93 +1072,10 @@ local function buildGUI()
         end
     end
 
-    local function stageJob()
-        log("7 job")
-        local c = card(jobPage, 108, 1)
-        label(c, "PIZZABAK", 8)
-        toggle(c, {
-            label = "Baka automatiskt", y = 24, value = state.job.enabled,
-            onChanged = function(v)
-                state.job.enabled = v
-                saveConfig()
-                notify(v and "Auto-pizza på" or "Auto-pizza av", v and "good" or nil)
-            end,
-        })
-        slider(c, {
-            label = "Intervall", min = 0.1, max = 3, step = 0.05,
-            value = state.job.interval, y = 54,
-            format = function(x) return string.format("%.2f s", x) end,
-            onChanged = function(x) state.job.interval = x; saveConfig() end,
-        })
-
-        local rc = card(jobPage, 92, 2)
-        slider(rc, {
-            label = "Sökradie", min = 4, max = 60, step = 1,
-            value = state.job.radius, y = 8,
-            format = function(x) return x .. " st" end,
-            onChanged = function(x) state.job.radius = x; saveConfig() end,
-        })
-        local jr = label(rc, "redo", 52, 9, C.dim)
-        _G.__VeniceSpeedSuite.jobReadout = function(txt, ok)
-            jr.Text = txt
-            jr.TextColor3 = ok and C.good or C.bad
-        end
-
-        local kc = card(jobPage, 96, 3)
-        label(kc, "NYCKELORD (ordning = prioritet)", 8)
-        local kb = new("TextBox", {
-            Size = UDim2.new(1, -20, 0, 52), Position = UDim2.new(0, 10, 0, 24),
-            BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
-            TextSize = 10, TextColor3 = C.text, TextWrapped = true,
-            ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
-        }, kc)
-        new("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
-
-        local function parseKeywords()
-            local out = {}
-            for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
-                if #w > 0 then table.insert(out, w) end
-            end
-            if #out > 0 then
-                state.job.keywords = out
-                saveConfig()
-            end
-        end
-        track(kb.FocusLost:Connect(parseKeywords))
-
-        local sc = card(jobPage, 48, 4)
-        button(sc, {
-            label = "Skanna nu", y = 10,
-            onClick = function()
-                local found = scanNearby(state.job.radius)
-                notify(string.format("%d träffar inom %d st", #found, state.job.radius),
-                    #found > 0 and "good" or "bad")
-                if #found > 0 then
-                    local names = {}
-                    for i = 1, math.min(3, #found) do
-                        table.insert(names, found[i].text:sub(1, 22))
-                    end
-                    jr.Text = table.concat(names, " | ")
-                    jr.TextColor3 = C.text
-                end
-            end,
-        })
-
-        local nc = card(jobPage, 74, 5)
-        new("TextLabel", {
-            Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
-            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-            TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Trycker ProximityPrompt och ClickDetector i den ordning nyckelorden "
-                .. "står. Står du still vid stationen går kedjan deg → sås → ost → ugn "
-                .. "→ skär → låda. Ordna om eller lägg till egna ord om något missas.",
-        }, nc)
-    end
-
     local refreshPlayers
 
     local function stagePlayers()
-        log("8 players")
+        log("7 players")
         local c = card(playersPage, 140, 1)
         label(c, "SERVER", 8)
         local count = label(c, "—", 22, 10, C.dim)
@@ -1229,7 +1211,7 @@ local function buildGUI()
     end
 
     local function stageSettings()
-        log("9 settings")
+        log("8 settings")
         local c = card(settPage, 100, 1)
         label(c, "FARTSGRÄNSER", 8)
         toggle(c, {
@@ -1249,7 +1231,6 @@ local function buildGUI()
 
         local zc = card(settPage, 160, 2)
         label(zc, "ZONER", 8)
-
         local add = new("TextButton", {
             Size = UDim2.new(1, -150, 0, 24), Position = UDim2.new(0, 10, 0, 22),
             BackgroundColor3 = C.track, BorderSizePixel = 0, AutoButtonColor = false,
@@ -1367,6 +1348,98 @@ local function buildGUI()
         })
     end
 
+    local function stageJob()
+        log("9 job")
+        local c = card(jobPage, 130, 1)
+        label(c, "PIZZABAK", 8)
+        toggle(c, {
+            label = "Baka automatiskt", y = 24, value = state.job.enabled,
+            onChanged = function(v)
+                state.job.enabled = v
+                saveConfig()
+                table.clear(cooldown)
+                notify(v and "Auto-pizza på" or "Auto-pizza av", v and "good" or nil)
+                if not v then jset("Avstängt", true) end
+            end,
+        })
+        toggle(c, {
+            label = "Gå fram själv", y = 52, value = state.job.walk,
+            onChanged = function(v)
+                state.job.walk = v
+                saveConfig()
+                notify(v and "Går fram till stationer" or "Står still", nil)
+            end,
+        })
+        slider(c, {
+            label = "Intervall", min = 0.1, max = 3, step = 0.05,
+            value = state.job.interval, y = 82,
+            format = function(x) return string.format("%.2f s", x) end,
+            onChanged = function(x) state.job.interval = x; saveConfig() end,
+        })
+
+        local rc = card(jobPage, 78, 2)
+        slider(rc, {
+            label = "Sökradie", min = 4, max = 60, step = 1,
+            value = state.job.radius, y = 6,
+            format = function(x) return x .. " st" end,
+            onChanged = function(x) state.job.radius = x; saveConfig() end,
+        })
+        jobStatus = label(rc, "redo", 44, 9, C.dim)
+        jobCount = label(rc, "0 åtgärder", 58, 9, C.dim)
+
+        local kc = card(jobPage, 100, 3)
+        label(kc, "NYCKELORD · ORDNING = PRIORITET", 8)
+        local kb = new("TextBox", {
+            Size = UDim2.new(1, -20, 0, 56), Position = UDim2.new(0, 10, 0, 24),
+            BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
+            TextSize = 10, TextColor3 = C.text, TextWrapped = true,
+            ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
+        }, kc)
+        new("UICorner", { CornerRadius = UDim.new(0, 6) }, kb)
+
+        track(kb.FocusLost:Connect(function()
+            local out = {}
+            for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
+                if #w > 0 then table.insert(out, w) end
+            end
+            if #out > 0 then
+                state.job.keywords = out
+                table.clear(cooldown)
+                saveConfig()
+                notify(#out .. " nyckelord sparade", "good")
+            end
+        end))
+
+        local sc = card(jobPage, 48, 4)
+        button(sc, {
+            label = "Skanna nu", y = 10,
+            onClick = function()
+                local found = scanRadius(state.job.radius)
+                notify(string.format("%d träffar inom %d st", #found, state.job.radius),
+                    #found > 0 and "good" or "bad")
+                if #found > 0 then
+                    local names = {}
+                    for i = 1, math.min(4, #found) do
+                        table.insert(names, found[i].text:sub(1, 18))
+                    end
+                    jset(table.concat(names, " | "), true)
+                end
+            end,
+        })
+
+        local nc = card(jobPage, 96, 5)
+        new("TextLabel", {
+            Size = UDim2.new(1, -20, 1, -16), Position = UDim2.new(0, 10, 0, 8),
+            BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
+            TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "Ställ dig vid pizzastationen och slå på. Ligger nästa station mer än "
+                .. "7 studs bort går karaktären dit själv. Varje station får 1,4 s "
+                .. "väntetid innan den används igen, så kedjan deg → sås → ost → ugn "
+                .. "→ skär → låda inte spammar samma knapp. Fungerar bara om stationen "
+                .. "har ProximityPrompt eller ClickDetector — tryck Skanna nu först.",
+        }, nc)
+    end
+
     local function stageControls()
         log("10 controls")
         local min = false
@@ -1403,11 +1476,16 @@ local function buildGUI()
     end
 
     task.spawn(function()
-        local stages = { stagePlayer, stageVehicle, stageJob, stagePlayers, stageSettings, stageControls }
+        local stages = {
+            stagePlayer, stageVehicle, stagePlayers, stageSettings, stageControls, stageJob,
+        }
         for i, fn in ipairs(stages) do
             if myGen ~= generation then return end
             local ok, e = pcall(fn)
-            if not ok then warn("[Venice] steg " .. i .. ": " .. tostring(e)) end
+            if not ok then
+                warn("[Venice] steg " .. i .. ": " .. tostring(e))
+                jset("Steg " .. i .. " fel: " .. tostring(e), false)
+            end
             task.wait(0.05)
         end
         if myGen ~= generation then return end
@@ -1425,8 +1503,13 @@ local function buildGUI()
 
         task.spawn(function()
             while gui.Parent do
-                task.wait(math.max(state.job.interval, 0.1))
-                if state.job.enabled then pcall(pizzaStep) end
+                local iv = 0.25
+                pcall(function() iv = math.max(tonumber(state.job.interval) or 0.25, 0.1) end)
+                task.wait(iv)
+                if state.job.enabled then
+                    local ok, e = pcall(pizzaStep)
+                    if not ok then jset("Pizza-fel: " .. tostring(e), false) end
+                end
             end
         end)
 
@@ -1436,7 +1519,7 @@ local function buildGUI()
         end))
 
         tabs.Player.MouseButton1Click:Fire()
-        notify("Venice v1.7 · " .. state.ui.keybind.Name .. " visar", "good")
+        notify("Venice v1.8 · " .. state.ui.keybind.Name .. " visar", "good")
         log("12 klar")
     end)
 end
@@ -1451,7 +1534,7 @@ rebuild = function()
     end
 end
 
-bindSharedInput()
+pcall(bindSharedInput)
 local okB, errB = pcall(buildGUI)
 if not okB then
     warn("[Venice] BYGGE MISSLYCKADES: " .. tostring(errB))
