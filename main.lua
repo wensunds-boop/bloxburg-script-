@@ -1,6 +1,6 @@
 --!nocheck
--- VeniceSpeedSuite v3.4  |  Bloxburg
--- Fasta kortmått, ingen automatisk storlek.
+-- VeniceSpeedSuite v3.5  |  Bloxburg
+-- Binder på MouseButton1Down, explicit ZIndex, river gammal GUI.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -11,12 +11,15 @@ local StarterGui        = game:GetService("StarterGui")
 
 local lp = Players.LocalPlayer
 if not lp then return end
+local pg = lp:WaitForChild("PlayerGui")
 
 local G = getgenv()
 G.VeniceSuite = G.VeniceSuite or {}
 local S = G.VeniceSuite
-if S.dead then return end
 S.dead = false
+
+local stale = pg:FindFirstChild("VeniceSuite")
+if stale then stale:Destroy() end
 
 local function nc(f)
     local n = rawget(G, "newcclosure") or newcclosure
@@ -30,6 +33,23 @@ local function gfn(name)
     local ok, r = pcall(function() return _G[name] end)
     if ok and type(r) == "function" then return r end
     return nil
+end
+
+-- En enda bindningsväg. MouseButton1Down först, Activated som reserv.
+local function bind(btn, fn)
+    local last = 0
+    local function run()
+        local t = tick()
+        if t - last < 0.15 then return end
+        last = t
+        local ok, err = pcall(fn)
+        if not ok then warn("[Venice] " .. tostring(err)) end
+    end
+    btn.MouseButton1Down:Connect(run)
+    btn.Activated:Connect(run)
+    btn.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch then run() end
+    end)
 end
 
 ------------------------------------------------------------
@@ -74,7 +94,7 @@ local gui = mk("ScreenGui", {
     IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     DisplayOrder = 999,
-}, lp:WaitForChild("PlayerGui"))
+}, pg)
 
 local win = mk("Frame", {
     Size = UDim2.fromOffset(400, 470),
@@ -82,35 +102,53 @@ local win = mk("Frame", {
     BackgroundColor3 = Color3.fromRGB(18, 18, 21),
     BorderSizePixel = 0,
     Active = true,
+    ZIndex = 1,
 }, gui)
 
 local top = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 46),
     BackgroundColor3 = Color3.fromRGB(24, 24, 28),
     BorderSizePixel = 0,
+    Active = true,
+    ZIndex = 20,
 }, win)
 
 local body = mk("Frame", {
     Size = UDim2.new(1, 0, 1, -46),
     Position = UDim2.fromOffset(0, 46),
     BackgroundTransparency = 1,
+    ZIndex = 1,
 }, win)
 
 mk("Frame", {
     Size = UDim2.fromOffset(4, 46),
     BackgroundColor3 = Color3.fromRGB(120, 90, 255),
     BorderSizePixel = 0,
+    ZIndex = 21,
 }, top)
 
 mk("TextLabel", {
-    Size = UDim2.new(1, -110, 1, 0),
+    Size = UDim2.new(1, -180, 1, 0),
     Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1,
     Font = Enum.Font.GothamBold,
     TextSize = 15,
     TextColor3 = Color3.fromRGB(235, 235, 240),
     TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "VENICE SUITE  v3.4",
+    Text = "VENICE SUITE  v3.5",
+    ZIndex = 21,
+}, top)
+
+local activeLabel = mk("TextLabel", {
+    Size = UDim2.new(1, -180, 1, 0),
+    Position = UDim2.fromOffset(14, 0),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+    TextColor3 = Color3.fromRGB(140, 120, 240),
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Text = "",
+    ZIndex = 21,
 }, top)
 
 local minBtn = mk("TextButton", {
@@ -122,6 +160,8 @@ local minBtn = mk("TextButton", {
     TextSize = 14,
     TextColor3 = Color3.fromRGB(200, 200, 210),
     Text = "–",
+    AutoButtonColor = true,
+    ZIndex = 22,
 }, top)
 
 local closeBtn = mk("TextButton", {
@@ -133,12 +173,16 @@ local closeBtn = mk("TextButton", {
     TextSize = 14,
     TextColor3 = Color3.fromRGB(200, 200, 210),
     Text = "X",
+    AutoButtonColor = true,
+    ZIndex = 22,
 }, top)
 
 local tabBar = mk("Frame", {
     Size = UDim2.fromOffset(380, 30),
     Position = UDim2.fromOffset(10, 52),
     BackgroundTransparency = 1,
+    Active = true,
+    ZIndex = 15,
 }, win)
 mk("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal,
@@ -147,7 +191,7 @@ mk("UIListLayout", {
 }, tabBar)
 
 ------------------------------------------------------------
--- FLIKAR + KORT MED FASTA HÖJDER
+-- FLIKAR
 ------------------------------------------------------------
 local tabs, pages, pageCards = {}, {}, {}
 local order = 0
@@ -163,6 +207,8 @@ local function addTab(name)
         TextColor3 = Color3.fromRGB(170, 170, 180),
         Text = name,
         LayoutOrder = order,
+        AutoButtonColor = true,
+        ZIndex = 16,
     }, tabBar)
 
     local p = mk("ScrollingFrame", {
@@ -174,7 +220,7 @@ local function addTab(name)
         ScrollBarImageColor3 = Color3.fromRGB(70, 70, 80),
         CanvasSize = UDim2.fromOffset(0, 0),
         Visible = false,
-        ClipsDescendants = true,
+        ZIndex = 5,
     }, win)
     mk("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, p)
 
@@ -182,12 +228,14 @@ local function addTab(name)
     pages[name] = p
     pageCards[p] = {}
 
-    b.Activated:Connect(function()
+    bind(b, function()
         for n, bb in pairs(tabs) do
-            bb.BackgroundColor3 = n == name and Color3.fromRGB(45, 38, 70) or Color3.fromRGB(28, 28, 33)
-            bb.TextColor3 = n == name and Color3.fromRGB(210, 200, 255) or Color3.fromRGB(170, 170, 180)
-            pages[n].Visible = (n == name)
+            local on = (n == name)
+            bb.BackgroundColor3 = on and Color3.fromRGB(45, 38, 70) or Color3.fromRGB(28, 28, 33)
+            bb.TextColor3 = on and Color3.fromRGB(210, 200, 255) or Color3.fromRGB(170, 170, 180)
+            pages[n].Visible = on
         end
+        activeLabel.Text = name
     end)
     return p
 end
@@ -206,6 +254,7 @@ local function card(page, title, height)
         BackgroundColor3 = Color3.fromRGB(25, 25, 30),
         BorderSizePixel = 0,
         LayoutOrder = cardOrder,
+        ZIndex = 6,
     }, page)
     mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, c)
     mk("UIPadding", {
@@ -221,6 +270,7 @@ local function card(page, title, height)
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = title,
         LayoutOrder = 1,
+        ZIndex = 7,
     }, c)
     pageCards[page][c] = height
     recalc(page)
@@ -238,17 +288,21 @@ local function slider(page, label, min, max, def, cb)
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = tostring(def),
         LayoutOrder = 2,
+        ZIndex = 7,
     }, c)
     local bar = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 20),
         BackgroundColor3 = Color3.fromRGB(40, 40, 48),
         BorderSizePixel = 0,
+        Active = true,
         LayoutOrder = 3,
+        ZIndex = 7,
     }, c)
     local fill = mk("Frame", {
         Size = UDim2.fromScale((def - min) / (max - min), 1),
         BackgroundColor3 = Color3.fromRGB(120, 90, 255),
         BorderSizePixel = 0,
+        ZIndex = 8,
     }, bar)
     local dragging = false
     local function set(v)
@@ -257,15 +311,18 @@ local function slider(page, label, min, max, def, cb)
         val.Text = tostring(math.floor(v))
         cb(v)
     end
+    local function fromX(x)
+        set(min + (max - min) * math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1))
+    end
     bar.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             dragging = true
-            set(min + (max - min) * math.clamp((i.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1))
+            fromX(i.Position.X)
         end
     end)
     UserInputService.InputChanged:Connect(function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            set(min + (max - min) * math.clamp((i.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1))
+            fromX(i.Position.X)
         end
     end)
     UserInputService.InputEnded:Connect(function(i)
@@ -286,9 +343,11 @@ local function toggle(page, label, def, cb)
         TextColor3 = Color3.fromRGB(230, 230, 235),
         Text = def and "PÅ" or "AV",
         LayoutOrder = 2,
+        AutoButtonColor = true,
+        ZIndex = 7,
     }, c)
     local state = def
-    b.Activated:Connect(function()
+    bind(b, function()
         state = not state
         b.Text = state and "PÅ" or "AV"
         b.BackgroundColor3 = state and Color3.fromRGB(70, 55, 140) or Color3.fromRGB(38, 38, 45)
@@ -309,8 +368,10 @@ local function button(page, label, text, color, cb, h)
         TextColor3 = Color3.fromRGB(235, 235, 240),
         Text = text,
         LayoutOrder = 2,
+        AutoButtonColor = true,
+        ZIndex = 7,
     }, c)
-    b.Activated:Connect(cb)
+    bind(b, cb)
     return b
 end
 
@@ -325,6 +386,7 @@ local function readout(page, label, text)
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = text,
         LayoutOrder = 2,
+        ZIndex = 7,
     }, c)
     return l, c
 end
@@ -354,13 +416,14 @@ UserInputService.InputChanged:Connect(function(i)
 end)
 
 local minimized = false
-minBtn.Activated:Connect(function()
+bind(minBtn, function()
     minimized = not minimized
     body.Visible = not minimized
+    tabBar.Visible = not minimized
     win.Size = UDim2.fromOffset(400, minimized and 46 or 470)
     minBtn.Text = minimized and "+" or "–"
 end)
-closeBtn.Activated:Connect(function()
+bind(closeBtn, function()
     S.dead = true
     gui:Destroy()
 end)
@@ -374,9 +437,12 @@ local pZone   = addTab("Zoner")
 local pPlr    = addTab("Spelare")
 local pJob    = addTab("Jobb")
 tabs.Player.Activated:Fire()
+activeLabel.Text = "Player"
+pages.Player.Visible = true
+tabs.Player.BackgroundColor3 = Color3.fromRGB(45, 38, 70)
 
 ------------------------------------------------------------
--- KARAKTÄRSHJÄLP
+-- KARAKTÄR
 ------------------------------------------------------------
 local function char()
     local c = lp.Character
@@ -401,9 +467,6 @@ RunService.Heartbeat:Connect(function()
     if h and math.abs(h.WalkSpeed - CFG.walk) > 0.6 then h.WalkSpeed = CFG.walk end
 end)
 
-------------------------------------------------------------
--- PLAYER
-------------------------------------------------------------
 slider(pPlayer, "Gånghastighet", 16, 200, CFG.walk, function(v) CFG.walk = v; applyWalk(); saveCfg() end)
 toggle(pPlayer, "Gånghastighet på", CFG.walkOn, function(v) CFG.walkOn = v; applyWalk() end)
 
@@ -421,15 +484,10 @@ local function getSeat()
     local h = c:FindFirstChildOfClass("Humanoid")
     local s = h and h.SeatPart
     if s and s:IsA("VehicleSeat") then return s end
-    local veh = c:FindFirstChild("Vehicle")
-    if veh then
-        local s2 = veh:FindFirstChildOfClass("VehicleSeat")
-        if s2 then return s2 end
-    end
     for _, d in ipairs(c:GetChildren()) do
         if d.Name:sub(1, 8) == "Vehicle_" then
-            local s3 = d:FindFirstChildOfClass("VehicleSeat")
-            if s3 then return s3 end
+            local s2 = d:FindFirstChildOfClass("VehicleSeat")
+            if s2 then return s2 end
         end
     end
     return nil
@@ -460,8 +518,8 @@ toggle(pVeh, "Fordonsboost på", CFG.vehOn, function(v) CFG.vehOn = v end)
 -- ZONER
 ------------------------------------------------------------
 local zoneLabel = readout(pZone, "Status", "Ingen zon")
-local zones = {}
 local zoneCountLabel = readout(pZone, "Antal", "0 zoner")
+local zones = {}
 
 RunService.Heartbeat:Connect(function()
     if not CFG.zoneOn then return end
@@ -514,6 +572,7 @@ local plrList = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     BackgroundTransparency = 1,
     LayoutOrder = 2,
+    ZIndex = 7,
 }, plrCard)
 mk("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, plrList)
 
@@ -536,8 +595,10 @@ local function refreshPlayers()
                 TextXAlignment = Enum.TextXAlignment.Left,
                 Text = "  " .. pl.Name,
                 LayoutOrder = i,
+                AutoButtonColor = true,
+                ZIndex = 8,
             }, plrList)
-            b.Activated:Connect(function()
+            bind(b, function()
                 selected[pl] = not selected[pl] and true or nil
                 refreshPlayers()
             end)
@@ -575,6 +636,7 @@ local diagLabel = mk("TextLabel", {
     TextWrapped = true,
     Text = "väntar...",
     LayoutOrder = 2,
+    ZIndex = 7,
 }, card(pJob, "Diagnostik", 134))
 
 local diag = {}
@@ -708,7 +770,6 @@ end
 
 local function fireButton(btn)
     if not btn or not btn:IsA("GuiButton") or not btn.Visible then return false end
-
     local gc = gfn("getconnections")
     if gc then
         local ok, conns = pcall(gc, btn.Activated)
@@ -718,12 +779,10 @@ local function fireButton(btn)
             end
         end
     end
-
     local fs = gfn("firesignal")
     if fs then
         if pcall(fs, btn.Activated) then blox.mode = "signal"; return true end
     end
-
     local cam = workspace.CurrentCamera
     if not cam then return false end
     local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
@@ -737,8 +796,7 @@ local function fireButton(btn)
 end
 
 local function interactUI()
-    local pg = lp:FindFirstChild("PlayerGui")
-    local ui = pg and pg:FindFirstChild("_interactUI")
+    local ui = pg:FindFirstChild("_interactUI")
     if not ui then return 0 end
     local btns = {}
     for _, d in ipairs(ui:GetDescendants()) do
@@ -910,7 +968,7 @@ task.spawn(function()
     status("redo")
     pcall(function()
         StarterGui:SetCore("SendNotification", {
-            Title = "Venice Suite v3.4",
+            Title = "Venice Suite v3.5",
             Text = "Modul: " .. tostring(diag.modules) .. " | Hook: " .. tostring(diag.hook),
             Duration = 4,
         })
