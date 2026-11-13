@@ -1,11 +1,10 @@
 --!nocheck
--- VeniceSpeedSuite v3.3  |  Bloxburg
--- Modulfri interaktion, hookfri kundjakt, stegvis teleport.
+-- VeniceSpeedSuite v3.4  |  Bloxburg
+-- Fasta kortmått, ingen automatisk storlek.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
-local TweenService      = game:GetService("TweenService")
 local HttpService       = game:GetService("HttpService")
 local VirtualUser       = game:GetService("VirtualUser")
 local StarterGui        = game:GetService("StarterGui")
@@ -37,21 +36,15 @@ end
 -- KONFIG
 ------------------------------------------------------------
 local CFG = {
-    walk        = 32,
-    walkOn      = true,
-    vehMax      = 220,
-    vehOn       = false,
-    zoneLimit   = 60,
-    zoneOn      = false,
-    farmOn      = false,
-    autoDeliver = true,
+    walk = 32, walkOn = true,
+    vehMax = 220, vehOn = false,
+    zoneLimit = 60, zoneOn = false,
+    farmOn = false, autoDeliver = true,
 }
 
 local function saveCfg()
     if not writefile then return end
-    pcall(function()
-        writefile("VeniceSpeedSuite.json", HttpService:JSONEncode(CFG))
-    end)
+    pcall(function() writefile("VeniceSpeedSuite.json", HttpService:JSONEncode(CFG)) end)
 end
 
 if isfile and readfile then
@@ -64,7 +57,7 @@ if isfile and readfile then
 end
 
 ------------------------------------------------------------
--- GUI-SKAL
+-- BYGGHJÄLP
 ------------------------------------------------------------
 local function mk(class, props, parent)
     local i = Instance.new(class)
@@ -84,7 +77,6 @@ local gui = mk("ScreenGui", {
 }, lp:WaitForChild("PlayerGui"))
 
 local win = mk("Frame", {
-    Name = "Main",
     Size = UDim2.fromOffset(400, 470),
     Position = UDim2.new(0.5, -200, 0.5, -235),
     BackgroundColor3 = Color3.fromRGB(18, 18, 21),
@@ -92,16 +84,16 @@ local win = mk("Frame", {
     Active = true,
 }, gui)
 
-local body = mk("Frame", {
-    Size = UDim2.new(1, 0, 1, -46),
-    Position = UDim2.fromOffset(0, 46),
-    BackgroundTransparency = 1,
-}, win)
-
 local top = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 46),
     BackgroundColor3 = Color3.fromRGB(24, 24, 28),
     BorderSizePixel = 0,
+}, win)
+
+local body = mk("Frame", {
+    Size = UDim2.new(1, 0, 1, -46),
+    Position = UDim2.fromOffset(0, 46),
+    BackgroundTransparency = 1,
 }, win)
 
 mk("Frame", {
@@ -118,7 +110,7 @@ mk("TextLabel", {
     TextSize = 15,
     TextColor3 = Color3.fromRGB(235, 235, 240),
     TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "VENICE SUITE  v3.3",
+    Text = "VENICE SUITE  v3.4",
 }, top)
 
 local minBtn = mk("TextButton", {
@@ -144,46 +136,51 @@ local closeBtn = mk("TextButton", {
 }, top)
 
 local tabBar = mk("Frame", {
-    Size = UDim2.fromOffset(0, 34),
+    Size = UDim2.fromOffset(380, 30),
     Position = UDim2.fromOffset(10, 52),
     BackgroundTransparency = 1,
 }, win)
 mk("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 6),
+    Padding = UDim.new(0, 5),
     SortOrder = Enum.SortOrder.LayoutOrder,
 }, tabBar)
 
-local pages = {}
-local tabs = {}
+------------------------------------------------------------
+-- FLIKAR + KORT MED FASTA HÖJDER
+------------------------------------------------------------
+local tabs, pages, pageCards = {}, {}, {}
 local order = 0
+
 local function addTab(name)
     order = order + 1
     local b = mk("TextButton", {
-        Size = UDim2.fromOffset(72, 30),
+        Size = UDim2.fromOffset(68, 28),
         BackgroundColor3 = Color3.fromRGB(28, 28, 33),
         BorderSizePixel = 0,
         Font = Enum.Font.GothamBold,
-        TextSize = 12,
+        TextSize = 11,
         TextColor3 = Color3.fromRGB(170, 170, 180),
         Text = name,
         LayoutOrder = order,
     }, tabBar)
 
     local p = mk("ScrollingFrame", {
-        Size = UDim2.new(1, -20, 1, -100),
-        Position = UDim2.fromOffset(10, 94),
+        Size = UDim2.new(1, -20, 1, -92),
+        Position = UDim2.fromOffset(10, 88),
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
         ScrollBarThickness = 3,
         ScrollBarImageColor3 = Color3.fromRGB(70, 70, 80),
         CanvasSize = UDim2.fromOffset(0, 0),
         Visible = false,
+        ClipsDescendants = true,
     }, win)
     mk("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, p)
 
     tabs[name] = b
     pages[name] = p
+    pageCards[p] = {}
 
     b.Activated:Connect(function()
         for n, bb in pairs(tabs) do
@@ -195,17 +192,26 @@ local function addTab(name)
     return p
 end
 
+local function recalc(page)
+    local total = 0
+    for _, h in pairs(pageCards[page]) do total = total + h + 8 end
+    page.CanvasSize = UDim2.fromOffset(0, total + 14)
+end
+
 local cardOrder = 0
-local function card(page, title)
+local function card(page, title, height)
     cardOrder = cardOrder + 1
     local c = mk("Frame", {
-        Size = UDim2.new(1, -8, 0, 0),
+        Size = UDim2.new(1, -8, 0, height),
         BackgroundColor3 = Color3.fromRGB(25, 25, 30),
         BorderSizePixel = 0,
         LayoutOrder = cardOrder,
     }, page)
     mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, c)
-    mk("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, c)
+    mk("UIPadding", {
+        PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+        PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+    }, c)
     mk("TextLabel", {
         Size = UDim2.new(1, 0, 0, 16),
         BackgroundTransparency = 1,
@@ -216,11 +222,13 @@ local function card(page, title)
         Text = title,
         LayoutOrder = 1,
     }, c)
+    pageCards[page][c] = height
+    recalc(page)
     return c
 end
 
 local function slider(page, label, min, max, def, cb)
-    local c = card(page, label)
+    local c = card(page, label, 78)
     local val = mk("TextLabel", {
         Size = UDim2.new(1, 0, 0, 14),
         BackgroundTransparency = 1,
@@ -268,9 +276,9 @@ local function slider(page, label, min, max, def, cb)
 end
 
 local function toggle(page, label, def, cb)
-    local c = card(page, label)
+    local c = card(page, label, 66)
     local b = mk("TextButton", {
-        Size = UDim2.new(1, 0, 0, 28),
+        Size = UDim2.new(1, 0, 0, 26),
         BackgroundColor3 = def and Color3.fromRGB(70, 55, 140) or Color3.fromRGB(38, 38, 45),
         BorderSizePixel = 0,
         Font = Enum.Font.GothamBold,
@@ -288,6 +296,37 @@ local function toggle(page, label, def, cb)
         saveCfg()
     end)
     return b
+end
+
+local function button(page, label, text, color, cb, h)
+    local c = card(page, label, h or 66)
+    local b = mk("TextButton", {
+        Size = UDim2.new(1, 0, 0, 28),
+        BackgroundColor3 = color,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextColor3 = Color3.fromRGB(235, 235, 240),
+        Text = text,
+        LayoutOrder = 2,
+    }, c)
+    b.Activated:Connect(cb)
+    return b
+end
+
+local function readout(page, label, text)
+    local c = card(page, label, 52)
+    local l = mk("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 14),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        TextColor3 = Color3.fromRGB(160, 160, 170),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = text,
+        LayoutOrder = 2,
+    }, c)
+    return l, c
 end
 
 ------------------------------------------------------------
@@ -308,8 +347,8 @@ UserInputService.InputChanged:Connect(function(i)
         local m = UserInputService:GetMouseLocation()
         local vp = workspace.CurrentCamera.ViewportSize
         win.Position = UDim2.fromOffset(
-            math.clamp(m.X + dragOff.X, 0, vp.X - win.AbsoluteSize.X),
-            math.clamp(m.Y + dragOff.Y, 0, vp.Y - win.AbsoluteSize.Y)
+            math.clamp(m.X + dragOff.X, 0, math.max(0, vp.X - win.AbsoluteSize.X)),
+            math.clamp(m.Y + dragOff.Y, 0, math.max(0, vp.Y - win.AbsoluteSize.Y))
         )
     end
 end)
@@ -318,7 +357,6 @@ local minimized = false
 minBtn.Activated:Connect(function()
     minimized = not minimized
     body.Visible = not minimized
-    tabBar.Visible = not minimized
     win.Size = UDim2.fromOffset(400, minimized and 46 or 470)
     minBtn.Text = minimized and "+" or "–"
 end)
@@ -338,20 +376,20 @@ local pJob    = addTab("Jobb")
 tabs.Player.Activated:Fire()
 
 ------------------------------------------------------------
--- SPELARE
+-- KARAKTÄRSHJÄLP
 ------------------------------------------------------------
 local function char()
     local c = lp.Character
-    return c and c:FindFirstChildOfClass("Humanoid") and c or nil
+    if c and c:FindFirstChildOfClass("Humanoid") then return c end
+    return nil
 end
-
 local function root()
     local c = lp.Character
     return c and c:FindFirstChild("HumanoidRootPart") or nil
 end
-
 local function applyWalk()
-    local h = char() and char():FindFirstChildOfClass("Humanoid")
+    local c = char()
+    local h = c and c:FindFirstChildOfClass("Humanoid")
     if h and CFG.walkOn then h.WalkSpeed = CFG.walk end
 end
 
@@ -363,22 +401,16 @@ RunService.Heartbeat:Connect(function()
     if h and math.abs(h.WalkSpeed - CFG.walk) > 0.6 then h.WalkSpeed = CFG.walk end
 end)
 
+------------------------------------------------------------
+-- PLAYER
+------------------------------------------------------------
 slider(pPlayer, "Gånghastighet", 16, 200, CFG.walk, function(v) CFG.walk = v; applyWalk(); saveCfg() end)
 toggle(pPlayer, "Gånghastighet på", CFG.walkOn, function(v) CFG.walkOn = v; applyWalk() end)
 
 ------------------------------------------------------------
 -- FORDON
 ------------------------------------------------------------
-local vehLabel = mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 14),
-    BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextColor3 = Color3.fromRGB(160, 160, 170),
-    TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "Inget fordon",
-    LayoutOrder = 2,
-}, card(pVeh, "Status"))
+local vehLabel = readout(pVeh, "Status", "Inget fordon")
 
 local function getSeat()
     local c = lp.Character
@@ -427,34 +459,9 @@ toggle(pVeh, "Fordonsboost på", CFG.vehOn, function(v) CFG.vehOn = v end)
 ------------------------------------------------------------
 -- ZONER
 ------------------------------------------------------------
-local zoneLabel = mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 14),
-    BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextColor3 = Color3.fromRGB(160, 160, 170),
-    TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "Ingen zon",
-    LayoutOrder = 2,
-}, card(pZone, "Status"))
-
-local zoneLimitLabel = mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 14),
-    BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextColor3 = Color3.fromRGB(160, 160, 170),
-    TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "0 zoner",
-    LayoutOrder = 2,
-}, card(pZone, "Zoner"))
-
+local zoneLabel = readout(pZone, "Status", "Ingen zon")
 local zones = {}
-local function refreshZones()
-    local n = 0
-    for _ in pairs(zones) do n = n + 1 end
-    zoneLimitLabel.Text = n .. " zoner"
-end
+local zoneCountLabel = readout(pZone, "Antal", "0 zoner")
 
 RunService.Heartbeat:Connect(function()
     if not CFG.zoneOn then return end
@@ -465,7 +472,8 @@ RunService.Heartbeat:Connect(function()
             local rel = z.part.CFrame:PointToObjectSpace(r.Position)
             local half = z.part.Size / 2
             if math.abs(rel.X) < half.X and math.abs(rel.Y) < half.Y and math.abs(rel.Z) < half.Z then
-                local h = char() and char():FindFirstChildOfClass("Humanoid")
+                local c = char()
+                local h = c and c:FindFirstChildOfClass("Humanoid")
                 if h then h.WalkSpeed = math.min(CFG.walk, z.limit) end
                 zoneLabel.Text = "Zon: " .. z.limit
                 return
@@ -475,19 +483,8 @@ RunService.Heartbeat:Connect(function()
     zoneLabel.Text = "Ingen zon"
 end)
 
-local addZoneBtn = mk("TextButton", {
-    Size = UDim2.new(1, 0, 0, 28),
-    BackgroundColor3 = Color3.fromRGB(50, 42, 95),
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(225, 220, 255),
-    Text = "Lägg zon här",
-    LayoutOrder = 2,
-}, card(pZone, "Skapa"))
-
 local zoneId = 0
-addZoneBtn.Activated:Connect(function()
+button(pZone, "Skapa", "Lägg zon här", Color3.fromRGB(50, 42, 95), function()
     local r = root()
     if not r then return end
     zoneId = zoneId + 1
@@ -501,20 +498,23 @@ addZoneBtn.Activated:Connect(function()
     p.Color = Color3.fromRGB(120, 90, 255)
     p.Parent = workspace
     zones[zoneId] = { part = p, limit = CFG.zoneLimit }
-    refreshZones()
+    local n = 0
+    for _ in pairs(zones) do n = n + 1 end
+    zoneCountLabel.Text = n .. " zoner"
 end)
 
 slider(pZone, "Zonhastighet", 16, 120, CFG.zoneLimit, function(v) CFG.zoneLimit = v; saveCfg() end)
 toggle(pZone, "Zoner på", CFG.zoneOn, function(v) CFG.zoneOn = v end)
 
 ------------------------------------------------------------
--- SPELARLISTA / KICK
+-- SPELARE
 ------------------------------------------------------------
+local plrCard = card(pPlr, "Server", 60)
 local plrList = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     BackgroundTransparency = 1,
     LayoutOrder = 2,
-}, card(pPlr, "Server"))
+}, plrCard)
 mk("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, plrList)
 
 local selected = {}
@@ -527,7 +527,7 @@ local function refreshPlayers()
         if pl ~= lp then
             i = i + 1
             local b = mk("TextButton", {
-                Size = UDim2.new(1, 0, 0, 26),
+                Size = UDim2.new(1, 0, 0, 24),
                 BackgroundColor3 = selected[pl] and Color3.fromRGB(70, 55, 140) or Color3.fromRGB(34, 34, 40),
                 BorderSizePixel = 0,
                 Font = Enum.Font.Gotham,
@@ -543,20 +543,13 @@ local function refreshPlayers()
             end)
         end
     end
+    plrList.Size = UDim2.new(1, 0, 0, i * 28)
+    pageCards[pPlr][plrCard] = 44 + i * 28
+    plrCard.Size = UDim2.new(1, -8, 0, 44 + i * 28)
+    recalc(pPlr)
 end
 
-local kickBtn = mk("TextButton", {
-    Size = UDim2.new(1, 0, 0, 28),
-    BackgroundColor3 = Color3.fromRGB(120, 45, 60),
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(255, 225, 230),
-    Text = "Kicka valda",
-    LayoutOrder = 2,
-}, card(pPlr, "Åtgärd"))
-
-kickBtn.Activated:Connect(function()
+button(pPlr, "Åtgärd", "Kicka valda", Color3.fromRGB(120, 45, 60), function()
     for pl in pairs(selected) do
         if pl.Parent then pcall(function() pl:Kick("Venice Suite") end) end
     end
@@ -569,10 +562,10 @@ Players.PlayerRemoving:Connect(function() task.wait(0.2) refreshPlayers() end)
 task.spawn(refreshPlayers)
 
 ------------------------------------------------------------
--- DIAGNOSTIK (beständigt kort)
+-- DIAGNOSTIK
 ------------------------------------------------------------
 local diagLabel = mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 96),
+    Size = UDim2.new(1, 0, 0, 100),
     BackgroundTransparency = 1,
     Font = Enum.Font.Code,
     TextSize = 10,
@@ -582,11 +575,11 @@ local diagLabel = mk("TextLabel", {
     TextWrapped = true,
     Text = "väntar...",
     LayoutOrder = 2,
-}, card(pJob, "Diagnostik"))
+}, card(pJob, "Diagnostik", 134))
 
 local diag = {}
 local function diagDraw()
-    local lines = {
+    diagLabel.Text = table.concat({
         "getloadedmodules: " .. tostring(diag.loaded or "nej"),
         "moduler: " .. tostring(diag.modules or "saknas"),
         "hook: " .. tostring(diag.hook or "nej"),
@@ -594,37 +587,22 @@ local function diagDraw()
         "jobb: " .. tostring(diag.job or "saknas"),
         "pizza: " .. tostring(diag.pizza or 0),
         "fel: " .. tostring(diag.err or "-"),
-    }
-    diagLabel.Text = table.concat(lines, "\n")
+    }, "\n")
 end
 
-local statusLabel = mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 14),
-    BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextColor3 = Color3.fromRGB(150, 150, 165),
-    TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "redo",
-    LayoutOrder = 2,
-}, card(pJob, "Status"))
-
-local function status(t)
-    statusLabel.Text = t
-end
+local statusLabel = readout(pJob, "Status", "redo")
+local function status(t) statusLabel.Text = t end
 
 ------------------------------------------------------------
--- BLOXBURG-LAGER
+-- BLOX-LAGER
 ------------------------------------------------------------
 local blox = { interaction = nil, job = nil, hook = false, mode = "none" }
 
--- 1. Moduler via getloadedmodules (kräver ingen require)
 local function scanModules()
     local gl = gfn("getloadedmodules")
     if not gl then diag.loaded = "nej"; return end
     local ok, mods = pcall(gl)
     if not ok or type(mods) ~= "table" then diag.loaded = "fel"; return end
-
     local n = 0
     for k, v in pairs(mods) do
         n = n + 1
@@ -643,7 +621,6 @@ local function scanModules()
     diag.modules = #found > 0 and table.concat(found, ",") or "saknas"
 end
 
--- 2. Reserv: require med olika identiteter
 local function tryRequire()
     if blox.interaction and blox.job then return end
     local containers = {
@@ -652,10 +629,9 @@ local function tryRequire()
         game:GetService("ReplicatedStorage"):FindFirstChild("Modules"),
     }
     local setid = gfn("setthreadidentity") or gfn("setidentity")
-    local ids = { 2, 7, 8, 0 }
     for _, c in ipairs(containers) do
         if c then
-            for _, id in ipairs(ids) do
+            for _, id in ipairs({ 2, 7, 8, 0 }) do
                 pcall(function()
                     if setid then setid(id) end
                     if not blox.interaction then
@@ -673,25 +649,8 @@ local function tryRequire()
     pcall(function() if setid then setid(0) end end)
 end
 
--- 3. Hook: hookmetamethod -> manuell __namecall -> ingen
 local captured = nil
 local function hookNamecall()
-    local function handler(old)
-        return nc(function(self, ...)
-            local method
-            pcall(function() method = getnamecallmethod() end)
-            if method ~= "InvokeServer" then return old(self, ...) end
-            local res = old(self, ...)
-            pcall(function()
-                local tb = debug.traceback()
-                if tb:find("JobHandler") or tb:find("Delivery") or tb:find("Pizza") then
-                    if typeof(res) == "Instance" then captured = res end
-                end
-            end)
-            return res
-        end)
-    end
-
     local hm = gfn("hookmetamethod")
     if hm then
         local ok = pcall(function()
@@ -713,15 +672,25 @@ local function hookNamecall()
         if ok then blox.hook = true; diag.hook = "metod"; return end
     end
 
-    local getmt = gfn("getrawmetatable")
-    local setro = gfn("setreadonly")
-    local hookfn = gfn("hookfunction")
+    local getmt, setro, hookfn = gfn("getrawmetatable"), gfn("setreadonly"), gfn("hookfunction")
     if getmt then
         local ok, mt = pcall(getmt, game)
         if ok and type(mt) == "table" then
             local old = rawget(mt, "__namecall")
             if type(old) == "function" then
-                local wrapped = handler(old)
+                local wrapped = nc(function(self, ...)
+                    local method
+                    pcall(function() method = getnamecallmethod() end)
+                    if method ~= "InvokeServer" then return old(self, ...) end
+                    local res = old(self, ...)
+                    pcall(function()
+                        local tb = debug.traceback()
+                        if tb:find("JobHandler") or tb:find("Delivery") or tb:find("Pizza") then
+                            if typeof(res) == "Instance" then captured = res end
+                        end
+                    end)
+                    return res
+                end)
                 local done = false
                 if hookfn then done = pcall(hookfn, old, wrapped) end
                 if not done and setro then
@@ -737,26 +706,22 @@ local function hookNamecall()
     diag.hook = "nej"
 end
 
--- 4. Knapptryck: getconnections -> firesignal -> virtuell mus
 local function fireButton(btn)
-    if not btn or not btn:IsA("GuiButton") then return false end
-    if not btn.Visible then return false end
+    if not btn or not btn:IsA("GuiButton") or not btn.Visible then return false end
 
     local gc = gfn("getconnections")
     if gc then
         local ok, conns = pcall(gc, btn.Activated)
         if ok and type(conns) == "table" then
             for _, c in ipairs(conns) do
-                local ok2 = pcall(function() c:Fire() end)
-                if ok2 then blox.mode = "connections"; return true end
+                if pcall(function() c:Fire() end) then blox.mode = "connections"; return true end
             end
         end
     end
 
     local fs = gfn("firesignal")
     if fs then
-        local ok = pcall(fs, btn.Activated)
-        if ok then blox.mode = "signal"; return true end
+        if pcall(fs, btn.Activated) then blox.mode = "signal"; return true end
     end
 
     local cam = workspace.CurrentCamera
@@ -788,7 +753,6 @@ local function interactUI()
     return n
 end
 
--- 5. Pizza Planet
 local function pizzaPlanet()
     local p = workspace:FindFirstChild("PizzaPlanet")
     if p then
@@ -807,9 +771,7 @@ end
 
 local function pizzaCount()
     local n = 0
-    local c = lp.Character
-    local bp = lp:FindFirstChild("Backpack")
-    for _, box in ipairs({ c, bp }) do
+    for _, box in ipairs({ lp.Character, lp:FindFirstChild("Backpack") }) do
         if box then
             for _, d in ipairs(box:GetChildren()) do
                 if d:IsA("Tool") and d.Name:lower():find("pizza") then n = n + 1 end
@@ -824,45 +786,39 @@ local function nearestCustomer()
     if not r then return nil end
     local best, bestD = nil, 900
     for _, d in ipairs(workspace:GetDescendants()) do
-        if d:IsA("Model") and d:FindFirstChildOfClass("Humanoid") then
+        if d:IsA("Model") and d:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(d) then
             local hrp = d:FindFirstChild("HumanoidRootPart")
-            if hrp and not Players:GetPlayerFromCharacter(d) then
-                local hasMark = d:FindFirstChildWhichIsA("BillboardGui", true) ~= nil
+            if hrp and d:FindFirstChildWhichIsA("BillboardGui", true) then
                 local dist = (hrp.Position - r.Position).Magnitude
-                if hasMark and dist < bestD then best, bestD = hrp, dist end
+                if dist < bestD then best, bestD = hrp, dist end
             end
         end
     end
     return best
 end
 
--- 6. Stegvis teleport (anti-teleport)
 local function tp(target, steps)
     local r = root()
     if not r or not target then return end
     steps = steps or 4
     local start = r.Position
     for i = 1, steps do
-        local alpha = i / steps
-        local dest = start:Lerp(target, alpha)
-        pcall(function()
-            r.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0))
-        end)
+        local dest = start:Lerp(target, i / steps)
+        pcall(function() r.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0)) end)
         task.wait(0.06)
     end
     pcall(function() r.AssemblyLinearVelocity = Vector3.zero end)
 end
 
 ------------------------------------------------------------
--- JOBB / FARM
+-- JOBB
 ------------------------------------------------------------
 local function jobName()
     if blox.job then
         local ok, j = pcall(function() return blox.job:GetJob() end)
         if ok and j then return tostring(j) end
     end
-    local pp = pizzaPlanet()
-    local r = root()
+    local pp, r = pizzaPlanet(), root()
     if pp and r and (pp.Position - r.Position).Magnitude < 60 then return "PizzaPlanet" end
     if pizzaCount() > 0 then return "Leverans" end
     return nil
@@ -872,7 +828,6 @@ local farmRun = false
 local function farmLoop()
     if farmRun then return end
     farmRun = true
-
     task.spawn(function()
         while CFG.farmOn and not S.dead do
             local ok, err = pcall(function()
@@ -884,26 +839,21 @@ local function farmLoop()
                 local pp = pizzaPlanet()
                 if not pp then diag.err = "PizzaPlanet saknas"; return end
 
-                -- på jobbet?
                 local r = root()
-                local atJob = r and (pp.Position - r.Position).Magnitude < 60
-                if not atJob and pizzaCount() == 0 then
+                if not (r and (pp.Position - r.Position).Magnitude < 60) and pizzaCount() == 0 then
                     status("går till Pizza Planet")
                     tp(pp.Position, 6)
                     task.wait(1.2)
                 end
 
-                -- ta pizza
                 if pizzaCount() == 0 then
                     status("tar pizza")
                     interactUI()
                     task.wait(1)
-                    diag.pizza = pizzaCount()
                     if pizzaCount() == 0 then diag.err = "ingen pizza togs" end
                     return
                 end
 
-                -- leverera
                 if CFG.autoDeliver then
                     local target = captured and captured:IsDescendantOf(workspace) and captured:FindFirstChild("HumanoidRootPart")
                     if not target then target = nearestCustomer() end
@@ -922,7 +872,6 @@ local function farmLoop()
             end)
             if not ok then diag.err = tostring(err) end
             diagDraw()
-
             for _ = 1, 18 do
                 if not CFG.farmOn or S.dead then break end
                 task.wait(1)
@@ -933,76 +882,39 @@ local function farmLoop()
     end)
 end
 
-------------------------------------------------------------
--- JOBBKNAPPAR
-------------------------------------------------------------
-local startBtn = mk("TextButton", {
-    Size = UDim2.new(1, 0, 0, 30),
-    BackgroundColor3 = Color3.fromRGB(60, 110, 70),
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(225, 255, 230),
-    Text = "Starta farm",
-    LayoutOrder = 2,
-}, card(pJob, "Kontroll"))
-
-local stopBtn = mk("TextButton", {
-    Size = UDim2.new(1, 0, 0, 30),
-    BackgroundColor3 = Color3.fromRGB(110, 55, 55),
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(255, 225, 225),
-    Text = "Stoppa",
-    LayoutOrder = 3,
-}, card(pJob, "Kontroll"))
-
-local testBtn = mk("TextButton", {
-    Size = UDim2.new(1, 0, 0, 30),
-    BackgroundColor3 = Color3.fromRGB(50, 50, 60),
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(220, 220, 230),
-    Text = "Testa interaktion",
-    LayoutOrder = 2,
-}, card(pJob, "Manuell"))
-
-startBtn.Activated:Connect(function()
+button(pJob, "Kontroll", "Starta farm", Color3.fromRGB(60, 110, 70), function()
     CFG.farmOn = true
     status("startar")
     farmLoop()
 end)
-stopBtn.Activated:Connect(function()
+button(pJob, "Kontroll", "Stoppa", Color3.fromRGB(110, 55, 55), function()
     CFG.farmOn = false
     status("stoppad")
 end)
-testBtn.Activated:Connect(function()
+button(pJob, "Manuell", "Testa interaktion", Color3.fromRGB(50, 50, 60), function()
     local n = interactUI()
     status("tryckte " .. n .. " knappar via " .. tostring(blox.mode))
 end)
 
 ------------------------------------------------------------
--- STARTSEKVENS
+-- START
 ------------------------------------------------------------
 task.spawn(function()
     task.wait(0.4)
     diagDraw()
-    scanModules()
-    diagDraw()
-    tryRequire()
-    diagDraw()
-    hookNamecall()
-    diagDraw()
+    scanModules(); diagDraw()
+    tryRequire(); diagDraw()
+    hookNamecall(); diagDraw()
     diag.job = jobName() or "saknas"
     diagDraw()
     status("redo")
-    StarterGui:SetCore("SendNotification", {
-        Title = "Venice Suite v3.3",
-        Text = "Modul: " .. tostring(diag.modules) .. " | Hook: " .. tostring(diag.hook),
-        Duration = 4,
-    })
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Venice Suite v3.4",
+            Text = "Modul: " .. tostring(diag.modules) .. " | Hook: " .. tostring(diag.hook),
+            Duration = 4,
+        })
+    end)
 end)
 
 lp.CharacterAdded:Connect(function()
