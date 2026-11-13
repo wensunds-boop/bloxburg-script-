@@ -1,13 +1,13 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v2.0  ·  Bloxburg
+  Venice Speed Suite  v2.1  ·  Bloxburg
   Author: Venice · MIT
   ---------------------------------------------------------------------
-  v2.0
-    · assist läser W/S istället för att gissa — inget håll = ingen assist
-    · moduler laddas separat, JobHandler kan falla utan att ta InteractionHandler
-    · diagnosknapp för jobbet
-    · omgjord GUI: skugga, kanter, gradient-header, hover, pill-flikar
+  v2.1
+    · skuggan borttagen (den lade ett svart lager över skärmen)
+    · nytt läge: Leverans med teleport — hämtar låda, hoppar till kund,
+      ger pizzan, hoppar tillbaka
+    · bakläget kvar som alternativ
   CLIENT-SIDE ONLY. Kicken är lokal.
 =====================================================================]]
 
@@ -34,11 +34,11 @@ end
 --=====================================================================
 local CONFIG_FILE = "VeniceSpeedSuite.json"
 local MAX_ZONES   = 40
+local PIZZA_SPOT  = Vector3.new(1169, 15, 273)
 
 local DEFAULT_KEYWORDS = {
-    "dough", "deg", "sauce", "sås", "cheese", "ost", "topping",
-    "oven", "ugn", "bake", "grädda", "cut", "skär", "box", "låda",
-    "serve", "give", "counter", "disk",
+    "take", "give", "dough", "sauce", "cheese", "topping",
+    "oven", "bake", "cut", "box",
 }
 
 local DEFAULTS = {
@@ -46,7 +46,7 @@ local DEFAULTS = {
     vehicle = { enabled = false, maxSpeed = 130, accel = 110, brake = 190, assist = true },
     limits  = { enabled = false, global = 110, zones = {} },
     job     = {
-        enabled = false, interval = 0.4, radius = 30, walk = true,
+        enabled = false, interval = 0.6, radius = 30, walk = true, mode = "deliver",
         jobName = "PizzaPlanetDelivery", keywords = DEFAULT_KEYWORDS,
     },
     ui      = { accent = Color3.fromRGB(94, 141, 255), keybind = Enum.KeyCode.K },
@@ -113,8 +113,9 @@ local function loadConfig()
     if type(j) == "table" then
         if type(j.enabled) == "boolean" then state.job.enabled = j.enabled end
         if type(j.walk) == "boolean" then state.job.walk = j.walk end
+        if j.mode == "deliver" or j.mode == "bake" then state.job.mode = j.mode end
         if type(j.jobName) == "string" then state.job.jobName = j.jobName end
-        state.job.interval = num(j.interval, 0.4, 0.15, 3)
+        state.job.interval = num(j.interval, 0.6, 0.15, 3)
         state.job.radius = num(j.radius, 30, 4, 60)
         if type(j.keywords) == "table" then
             local k = {}
@@ -199,9 +200,7 @@ local function tw(inst, dur, props)
     return t
 end
 
-local function corner(inst, px)
-    return new("UICorner", { CornerRadius = UDim.new(0, px) }, inst)
-end
+local function corner(inst, px) return new("UICorner", { CornerRadius = UDim.new(0, px) }, inst) end
 
 local function edge(inst, col, tr)
     return new("UIStroke", {
@@ -226,17 +225,17 @@ local function viewport()
 end
 
 local C = {
-    bg      = Color3.fromRGB(11, 13, 18),
-    panel   = Color3.fromRGB(18, 21, 28),
-    card    = Color3.fromRGB(24, 28, 36),
-    cardHi  = Color3.fromRGB(32, 37, 47),
-    edge    = Color3.fromRGB(44, 51, 64),
-    track   = Color3.fromRGB(44, 50, 62),
-    text    = Color3.fromRGB(236, 240, 248),
-    dim     = Color3.fromRGB(134, 144, 162),
-    good    = Color3.fromRGB(92, 220, 148),
-    warn    = Color3.fromRGB(255, 190, 90),
-    bad     = Color3.fromRGB(255, 112, 112),
+    bg     = Color3.fromRGB(11, 13, 18),
+    panel  = Color3.fromRGB(18, 21, 28),
+    card   = Color3.fromRGB(24, 28, 36),
+    cardHi = Color3.fromRGB(32, 37, 47),
+    edge   = Color3.fromRGB(44, 51, 64),
+    track  = Color3.fromRGB(44, 50, 62),
+    text   = Color3.fromRGB(240, 244, 250),
+    dim    = Color3.fromRGB(146, 156, 174),
+    good   = Color3.fromRGB(92, 220, 148),
+    warn   = Color3.fromRGB(255, 190, 90),
+    bad    = Color3.fromRGB(255, 112, 112),
 }
 
 local function buildFallback(err)
@@ -251,7 +250,6 @@ local function buildFallback(err)
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 11,
             TextWrapped = true, TextColor3 = C.bad, Text = "GUI fel: " .. tostring(err),
         }, f)
-        log("fallback")
     end)
 end
 
@@ -285,8 +283,6 @@ local function bindSharedInput()
 end
 
 --=====================================================================
--- Bloxburg-moduler
---=====================================================================
 local blox = { interaction = nil, job = nil, ui = nil, tried = false }
 
 local function initBlox()
@@ -298,24 +294,21 @@ local function initBlox()
     local okM = pcall(function()
         modules = LP:WaitForChild("PlayerScripts", 15):WaitForChild("Modules", 15)
     end)
-    if not okM or not modules then
-        log("Modules saknas")
-        return false
-    end
+    if not okM or not modules then return false end
 
     local okI = pcall(function()
         ident(2)
         blox.interaction = require(modules:WaitForChild("InteractionHandler", 10))
         ident(0)
     end)
-    if not okI then log("InteractionHandler gick inte att läsa") end
+    if not okI then log("InteractionHandler saknas") end
 
     local okJ = pcall(function()
         ident(2)
         blox.job = require(modules:WaitForChild("JobHandler", 10))
         ident(0)
     end)
-    if not okJ then log("JobHandler gick inte att läsa") end
+    if not okJ then log("JobHandler saknas") end
 
     return blox.interaction ~= nil
 end
@@ -326,10 +319,7 @@ local function getInteractUI()
     if ok and ui then blox.ui = ui; return ui end
     pcall(function()
         for _, d in ipairs(PlayerGui:GetChildren()) do
-            if d:IsA("ScreenGui") and d.Name:lower():find("interact") then
-                blox.ui = d
-                break
-            end
+            if d:IsA("ScreenGui") and d.Name:lower():find("interact") then blox.ui = d; break end
         end
     end)
     return blox.ui
@@ -337,12 +327,11 @@ end
 
 local function showMenu(model, part)
     if not initBlox() then return false end
-    local ok = pcall(function()
+    return (pcall(function()
         ident(2)
         blox.interaction:ShowMenu(model, part.Position, part)
         ident(0)
-    end)
-    return ok
+    end))
 end
 
 local function readButtons()
@@ -360,6 +349,16 @@ local function readButtons()
     return out
 end
 
+local function pressText(text)
+    for _, b in ipairs(readButtons()) do
+        if b.label:lower() == text:lower() then fireSignal(b.sig); return true end
+    end
+    for _, b in ipairs(readButtons()) do
+        if b.label:lower():find(text:lower(), 1, true) then fireSignal(b.sig); return true end
+    end
+    return false
+end
+
 --=====================================================================
 local WIN_W, WIN_H = 430, 520
 local CANVAS = 940
@@ -373,34 +372,24 @@ local function buildGUI()
         IgnoreGuiInset = true, DisplayOrder = 5000,
     }, PlayerGui)
 
-    local shadow = new("ImageLabel", {
-        Size = UDim2.new(1, 46, 1, 46), Position = UDim2.new(0, -23, 0, -20),
-        BackgroundTransparency = 1, ZIndex = 0,
-        Image = "rbxassetid://1316045217", ImageColor3 = Color3.new(0, 0, 0),
-        ImageTransparency = 0.45, ScaleType = Enum.ScaleType.Slice,
-        SliceCenter = Rect.new(10, 10, 118, 118),
-    }, gui)
-
     local win = new("Frame", {
         Size = UDim2.new(0, WIN_W, 0, WIN_H),
         Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -WIN_H / 2),
-        BackgroundColor3 = C.bg, BorderSizePixel = 0,
-        ClipsDescendants = true, ZIndex = 1,
+        BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true,
     }, gui)
     corner(win, 14)
-    edge(win, C.edge, 0.1)
+    edge(win, C.edge, 0.05)
 
     _G.__VeniceSpeedSuite = { gui = gui, win = win, teardown = teardown }
 
     log("2 header")
     local header = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel,
-        BorderSizePixel = 0, ZIndex = 2,
+        Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel, BorderSizePixel = 0,
     }, win)
 
     new("UIGradient", {
         Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(26, 31, 41)),
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 33, 43)),
             ColorSequenceKeypoint.new(1, C.panel),
         }),
         Rotation = 15,
@@ -408,33 +397,32 @@ local function buildGUI()
 
     new("Frame", {
         Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
-        BackgroundColor3 = C.edge, BorderSizePixel = 0, ZIndex = 3,
+        BackgroundColor3 = C.edge, BorderSizePixel = 0,
     }, header)
 
     local accentBar = new("Frame", {
-        Size = UDim2.new(0, 30, 0, 3), Position = UDim2.new(0, 16, 0, 36),
-        BackgroundColor3 = state.ui.accent, BorderSizePixel = 0, ZIndex = 3,
+        Size = UDim2.new(0, 30, 0, 3), Position = UDim2.new(0, 16, 0, 37),
+        BackgroundColor3 = state.ui.accent, BorderSizePixel = 0,
     }, header)
     corner(accentBar, 2)
 
     new("TextLabel", {
-        Size = UDim2.new(1, -110, 0, 20), Position = UDim2.new(0, 16, 0, 8),
+        Size = UDim2.new(1, -110, 0, 20), Position = UDim2.new(0, 16, 0, 9),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 16,
         TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "Venice Speed Suite", ZIndex = 3,
+        Text = "Venice Speed Suite",
     }, header)
 
     new("TextLabel", {
-        Size = UDim2.new(1, -110, 0, 12), Position = UDim2.new(0, 16, 0, 27),
+        Size = UDim2.new(1, -110, 0, 12), Position = UDim2.new(0, 16, 0, 28),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "Bloxburg · v2.0", ZIndex = 3,
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "Bloxburg · v2.1",
     }, header)
 
     local status = new("TextLabel", {
-        Size = UDim2.new(1, -110, 0, 12), Position = UDim2.new(0, 16, 0, 42),
+        Size = UDim2.new(1, -110, 0, 13), Position = UDim2.new(0, 16, 0, 42),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.good, TextXAlignment = Enum.TextXAlignment.Left, Text = "", ZIndex = 3,
+        TextColor3 = C.good, TextXAlignment = Enum.TextXAlignment.Left, Text = "",
     }, header)
 
     local function notify(text, kind)
@@ -449,9 +437,9 @@ local function buildGUI()
 
     local function hbtn(g, x, col)
         local b = new("TextButton", {
-            Size = UDim2.new(0, 27, 0, 25), Position = UDim2.new(1, x, 0, 14),
+            Size = UDim2.new(0, 27, 0, 25), Position = UDim2.new(1, x, 0, 15),
             BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false,
-            Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = col, Text = g, ZIndex = 4,
+            Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = col, Text = g,
         }, header)
         corner(b, 7)
         local st = edge(b, C.edge, 0.3)
@@ -479,7 +467,7 @@ local function buildGUI()
     log("4 tabs")
     local bar = new("Frame", {
         Size = UDim2.new(1, -24, 0, 32), Position = UDim2.new(0, 12, 0, 66),
-        BackgroundColor3 = C.panel, BorderSizePixel = 0, ZIndex = 2,
+        BackgroundColor3 = C.panel, BorderSizePixel = 0,
     }, win)
     corner(bar, 9)
     new("UIListLayout", {
@@ -490,7 +478,7 @@ local function buildGUI()
 
     local content = new("Frame", {
         Size = UDim2.new(1, -24, 1, -166), Position = UDim2.new(0, 12, 0, 108),
-        BackgroundTransparency = 1, ZIndex = 2,
+        BackgroundTransparency = 1,
     }, win)
 
     local pages, tabs = {}, {}
@@ -542,13 +530,13 @@ local function buildGUI()
             BorderSizePixel = 0, LayoutOrder = order,
         }, parent)
         corner(f, 10)
-        edge(f, C.edge, 0.25)
+        edge(f, C.edge, 0.2)
         return f
     end
 
     local function label(parent, text, y, size, col)
         return new("TextLabel", {
-            Size = UDim2.new(1, -24, 0, 14), Position = UDim2.new(0, 12, 0, y),
+            Size = UDim2.new(1, -24, 0, 15), Position = UDim2.new(0, 12, 0, y),
             BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
             TextSize = size or 9, TextColor3 = col or C.dim,
             TextXAlignment = Enum.TextXAlignment.Left, Text = text,
@@ -562,13 +550,13 @@ local function buildGUI()
         }, parent)
 
         new("TextLabel", {
-            Size = UDim2.new(1, -76, 0, 14), BackgroundTransparency = 1,
+            Size = UDim2.new(1, -76, 0, 15), BackgroundTransparency = 1,
             Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.text,
             TextXAlignment = Enum.TextXAlignment.Left, Text = cfg.label,
         }, row)
 
         local val = new("TextLabel", {
-            Size = UDim2.new(0, 76, 0, 14), Position = UDim2.new(1, -76, 0, 0),
+            Size = UDim2.new(0, 76, 0, 15), Position = UDim2.new(1, -76, 0, 0),
             BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11,
             TextColor3 = state.ui.accent, TextXAlignment = Enum.TextXAlignment.Right, Text = "",
         }, row)
@@ -591,7 +579,6 @@ local function buildGUI()
             BorderSizePixel = 0, ZIndex = 2,
         }, trk)
         corner(knob, 7)
-        edge(knob, state.ui.accent, 0)
 
         local hit = new("Frame", {
             Size = UDim2.new(1, 0, 0, 24), Position = UDim2.new(0, 0, 0.5, -12),
@@ -827,7 +814,6 @@ local function buildGUI()
         clearAssistRig()
     end
 
-    -- läs spelarens egna tangenter, inte spelets
     local function readThrottle()
         local uis = UserInputService
         if uis:IsKeyDown(Enum.KeyCode.W) or uis:IsKeyDown(Enum.KeyCode.Up) then return 1 end
@@ -894,21 +880,16 @@ local function buildGUI()
             end)
         end
 
-        local method = assist.anchored and "anchrad" or (assist.direct and "direkt" or "constraint")
-        local info = string.format("%s · %d säten", method, #assist.seats)
-
         local thr = readThrottle()
-
-        -- inget håll = ingen assist, bilen beter sig som vanligt
         if thr == 0 or not state.vehicle.assist or not primary or assist.anchored then
             if rig.force and rig.force.Parent then rig.force.MaxForce = 0 end
-            if u then u(model.Name, speed, thr, info) end
+            if u then u(model.Name, speed, thr) end
             return
         end
 
         local okF, fwd = pcall(function() return primary.CFrame.LookVector end)
         if not okF or typeof(fwd) ~= "Vector3" then
-            if u then u(model.Name, speed, thr, info) end
+            if u then u(model.Name, speed, thr) end
             return
         end
 
@@ -927,7 +908,7 @@ local function buildGUI()
                 if assist.probe > 1 then
                     if math.abs(fs - assist.probeFrom) < 2 then
                         assist.direct = true
-                        notify("Assist: ingen effekt — byter metod", "bad")
+                        notify("Assist: byter metod", "bad")
                     end
                     assist.probe = 0
                 end
@@ -946,7 +927,7 @@ local function buildGUI()
             pcall(function() primary.AssemblyLinearVelocity = nv end)
         end
 
-        if u then u(model.Name, speed, thr, info) end
+        if u then u(model.Name, speed, thr) end
     end
 
     -- jobb ----------------------------------------------------------
@@ -971,16 +952,111 @@ local function buildGUI()
             return workspace:GetPartBoundsInRadius(root.Position, radius, params)
         end)
         if ok and parts then return parts end
-        local out = {}
+        return {}
+    end
+
+    local function teleportTo(pos)
+        local char = LP.Character
+        local root = getRoot()
+        if not char or not root then return false end
+        local target = CFrame.new(pos + Vector3.new(0, 4, 0))
+        pcall(function() root.Anchored = true end)
+        local veh = vehicleFromCharacter()
+        if veh then
+            pcall(function() veh:PivotTo(target) end)
+        else
+            pcall(function() char:PivotTo(target) end)
+        end
+        task.wait(0.12)
+        pcall(function() root.Anchored = false end)
+        return true
+    end
+
+    local function hasBox()
+        local char = LP.Character
+        if not char then return false end
+        for _, d in ipairs(char:GetChildren()) do
+            if d.Name:lower():find("pizza box", 1, true) then return true end
+        end
+        return false
+    end
+
+    local function conveyor()
+        local ok, conv = pcall(function()
+            return workspace.Environment.Locations.PizzaPlanet.Conveyor.MovingBoxes
+        end)
+        if ok then return conv end
+        return nil
+    end
+
+    local function findCustomer()
+        local root = getRoot()
+        if not root then return nil end
+        local best, bestDist = nil, math.huge
         pcall(function()
             for _, d in ipairs(workspace:GetDescendants()) do
-                if #out > 60 then break end
-                if d:IsA("BasePart") and (d.Position - root.Position).Magnitude <= radius then
-                    table.insert(out, d)
+                if d:IsA("Model") and d.Name:lower():find("customer", 1, true) then
+                    local p = d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart")
+                    if p then
+                        local dist = (p.Position - root.Position).Magnitude
+                        if dist < bestDist then best, bestDist = d, dist end
+                    end
                 end
             end
         end)
-        return out
+        return best
+    end
+
+    local function deliverStep()
+        local hum = getHumanoid()
+        if not hum then return jset("Ingen karaktär", false) end
+
+        if not hasBox() then
+            -- hämta låda
+            if (hum.Player and false) then end
+            local root = getRoot()
+            if not root then return end
+            if (root.Position - PIZZA_SPOT).Magnitude > 12 then
+                teleportTo(PIZZA_SPOT)
+                return jset("Tillbaka till pizzan", true)
+            end
+            local conv = conveyor()
+            if not conv then return jset("Hittar ingen conveyor", false) end
+            local box = conv:FindFirstChildWhichIsA("BasePart")
+            if not box then return jset("Inga lådor på bandet", false) end
+            showMenu(box, box)
+            task.wait(0.08)
+            if pressText("take") then
+                jset("Tog låda", true)
+            else
+                jset("Kunde inte ta låda", false)
+            end
+            return
+        end
+
+        -- har låda: till kund
+        local cust = findCustomer()
+        if not cust then return jset("Hittar ingen kund", false) end
+        local cp = cust.PrimaryPart or cust:FindFirstChildWhichIsA("BasePart")
+        if not cp then return jset("Kund utan del", false) end
+
+        local root = getRoot()
+        if root and (root.Position - cp.Position).Magnitude > 8 then
+            teleportTo(cp.Position)
+            return jset("Framme hos kund", true)
+        end
+
+        showMenu(cust, cp)
+        task.wait(0.08)
+        if pressText("give") then
+            jobDone += 1
+            if jobCount and jobCount.Parent then jobCount.Text = jobDone .. " leveranser" end
+            jset("Gav pizza", true)
+            task.wait(0.15)
+            teleportTo(PIZZA_SPOT)
+        else
+            jset("Kunde inte ge pizza", false)
+        end
     end
 
     local function probeStation(part)
@@ -1026,52 +1102,49 @@ local function buildGUI()
         return nil
     end
 
-    local function pizzaStep()
-        if not state.job.enabled then return end
+    local function bakeStep()
         local hum, root = getHumanoid(), getRoot()
         if not hum or not root then return jset("Ingen karaktär", false) end
-        if hum.Health <= 0 then return end
         if vehicleFromCharacter() then return jset("Sitter i fordon", false) end
         if not initBlox() then return jset("InteractionHandler saknas", false) end
 
         local stations = scanStations(state.job.radius)
         if #stations == 0 then
             stationCache = {}
-            return jset("Inga stationer inom " .. math.floor(state.job.radius) .. " st", false)
+            return jset("Inga stationer i radien", false)
         end
-
         local st, btn, kw = pickStation(stations)
         if not st then return jset(#stations .. " stationer i vänteläge", true) end
 
         local dist = (st.part.Position - root.Position).Magnitude
         if dist > 8 and state.job.walk then
             pcall(function() hum:MoveTo(st.part.Position) end)
-            return jset("Går till " .. kw .. string.format(" (%.0f st)", dist), true)
+            return jset("Går till " .. kw, true)
         end
 
         showMenu(st.model, st.part)
         task.wait(0.05)
         local buttons = readButtons()
-        if #buttons == 0 then
-            stationCache[st.model] = nil
-            return jset("Menyn tom på " .. kw, false)
-        end
-
-        local target = btn
-        if not target then
-            for _, b in ipairs(buttons) do
-                if b.label:lower():find(kw, 1, true) then target = b; break end
-            end
-        end
-        target = target or buttons[1]
-
+        if #buttons == 0 then stationCache[st.model] = nil; return jset("Menyn tom", false) end
+        local target = btn or buttons[1]
         if fireSignal(target.sig) then
             cooldown[kw] = os.clock() + 1.2
             jobDone += 1
             if jobCount and jobCount.Parent then jobCount.Text = jobDone .. " åtgärder" end
             jset("Tryckte: " .. target.label, true)
         else
-            jset("Klick misslyckades: " .. target.label, false)
+            jset("Klick misslyckades", false)
+        end
+    end
+
+    local function jobStep()
+        if not state.job.enabled then return end
+        if not initBlox() then return jset("Moduler saknas", false) end
+        if state.job.mode == "deliver" then
+            local ok, e = pcall(deliverStep)
+            if not ok then jset("Leveransfel: " .. tostring(e), false) end
+        else
+            bakeStep()
         end
     end
 
@@ -1135,15 +1208,14 @@ local function buildGUI()
         end
     end
 
-    local detLabel, spdLabel, infoLabel
+    local detLabel, spdLabel
 
     local function stageVehicle()
         log("6 vehicle")
-        local d = card(vehiclePage, 84, 1)
+        local d = card(vehiclePage, 76, 1)
         label(d, "FORDON", 10)
         detLabel = label(d, "Inte i fordon", 28, 12, C.dim)
         spdLabel = label(d, "0.0 st/s", 46, 10, C.dim)
-        infoLabel = label(d, "—", 60, 9, C.dim)
 
         local c = card(vehiclePage, 148, 2)
         toggle(c, {
@@ -1167,7 +1239,7 @@ local function buildGUI()
             onChanged = function(x) state.vehicle.accel = x; saveConfig() end,
         })
 
-        local bc = card(vehiclePage, 118, 3)
+        local bc = card(vehiclePage, 120, 3)
         slider(bc, {
             label = "Bromskraft", min = 40, max = 900, step = 10,
             value = state.vehicle.brake, y = 10,
@@ -1179,14 +1251,14 @@ local function buildGUI()
             onChanged = function(v)
                 state.vehicle.assist = v
                 saveConfig()
-                notify(v and "Assist på — bara medan du håller gas" or "Assist av", nil)
+                notify(v and "Assist på — bara med gas" or "Assist av", nil)
             end,
         })
         new("TextLabel", {
-            Size = UDim2.new(1, -24, 0, 24), Position = UDim2.new(0, 12, 0, 88),
+            Size = UDim2.new(1, -24, 0, 26), Position = UDim2.new(0, 12, 0, 88),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Släpper du gasen stängs assisten av och bilen bromsar som vanligt.",
+            Text = "Släpper du gasen kopplas assisten ur och bilen bromsar som vanligt.",
         }, bc)
 
         local rc = card(vehiclePage, 52, 4)
@@ -1199,23 +1271,21 @@ local function buildGUI()
             end,
         })
 
-        _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, thr, info)
+        _G.__VeniceSpeedSuite.vehicleReadout = function(name, speed, thr)
             detLabel.Text = name and ("I: " .. name) or "Inte i fordon"
             detLabel.TextColor3 = name and C.good or C.dim
             spdLabel.Text = string.format("%.1f st/s%s", speed,
                 thr == 1 and "  ·  GAS" or thr == -1 and "  ·  BACK" or "")
             spdLabel.TextColor3 = thr ~= 0 and C.accent or C.dim
-            infoLabel.Text = info or "—"
-            infoLabel.TextColor3 = (info and info:find("anchrad")) and C.bad or C.dim
         end
     end
 
     local function stageJob()
         log("7 job")
-        local c = card(jobPage, 148, 1)
-        label(c, "PIZZABAK", 10)
+        local c = card(jobPage, 156, 1)
+        label(c, "PIZZA", 10)
         toggle(c, {
-            label = "Baka automatiskt", y = 28, value = state.job.enabled,
+            label = "Aktivera", y = 28, value = state.job.enabled,
             onChanged = function(v)
                 state.job.enabled = v
                 saveConfig()
@@ -1225,34 +1295,68 @@ local function buildGUI()
                 if not v then jset("Avstängt", true) end
             end,
         })
+
+        local modeRow = new("Frame", {
+            Size = UDim2.new(1, -24, 0, 28), Position = UDim2.new(0, 12, 0, 58),
+            BackgroundTransparency = 1,
+        }, c)
+        new("TextLabel", {
+            Size = UDim2.new(1, -110, 1, 0), BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = "Läge",
+        }, modeRow)
+
+        local function modeBtn(txt, x, mode)
+            local b = new("TextButton", {
+                Size = UDim2.new(0, 52, 0, 22), Position = UDim2.new(1, x, 0.5, -11),
+                BackgroundColor3 = state.job.mode == mode and state.ui.accent or C.track,
+                BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.Gotham,
+                TextSize = 9, TextColor3 = Color3.new(1, 1, 1), Text = txt,
+            }, modeRow)
+            corner(b, 6)
+            track(b.MouseButton1Click:Connect(function()
+                state.job.mode = mode
+                saveConfig()
+                for _, o in ipairs(modeRow:GetChildren()) do
+                    if o:IsA("TextButton") then
+                        o.BackgroundColor3 = (o.Text == txt) and state.ui.accent or C.track
+                    end
+                end
+                notify("Läge: " .. mode, "good")
+            end))
+            return b
+        end
+        modeBtn("Lev.", -110, "deliver")
+        modeBtn("Baka", -54, "bake")
+
         toggle(c, {
-            label = "Gå fram själv", y = 56, value = state.job.walk,
+            label = "Gå fram själv (bakläge)", y = 90, value = state.job.walk,
             onChanged = function(v) state.job.walk = v; saveConfig() end,
         })
         slider(c, {
-            label = "Intervall", min = 0.15, max = 3, step = 0.05,
-            value = state.job.interval, y = 88,
+            label = "Intervall", min = 0.2, max = 3, step = 0.05,
+            value = state.job.interval, y = 118,
             format = function(x) return string.format("%.2f s", x) end,
             onChanged = function(x) state.job.interval = x; saveConfig() end,
         })
-        jobJob = label(c, "jobb: —", 128, 9, C.dim)
 
-        local rc = card(jobPage, 88, 2)
+        local rc = card(jobPage, 92, 2)
         slider(rc, {
-            label = "Sökradie", min = 6, max = 60, step = 1,
+            label = "Sökradie (bakläge)", min = 6, max = 60, step = 1,
             value = state.job.radius, y = 10,
             format = function(x) return x .. " st" end,
             onChanged = function(x) state.job.radius = x; saveConfig(); stationCache = {} end,
         })
-        jobStatus = label(rc, "redo", 50, 9, C.dim)
-        jobCount = label(rc, "0 åtgärder", 64, 9, C.dim)
+        jobStatus = label(rc, "redo", 52, 9, C.dim)
+        jobCount = label(rc, "0", 66, 9, C.dim)
+        jobJob = label(rc, "jobb: —", 78, 9, C.dim)
 
         local wc = card(jobPage, 82, 3)
         button(wc, {
             label = "Börja jobba", y = 10,
             onClick = function()
                 if not initBlox() then return notify("Moduler saknas", "bad") end
-                if not blox.job then return notify("JobHandler saknas — gå till jobbtavlan", "bad") end
+                if not blox.job then return notify("JobHandler saknas", "bad") end
                 local ok, e = pcall(function()
                     ident(2)
                     blox.job:GoToWork(state.job.jobName)
@@ -1273,16 +1377,15 @@ local function buildGUI()
             end,
         })
 
-        local kc = card(jobPage, 112, 4)
-        label(kc, "NYCKELORD · ORDNING = PRIORITET", 10)
+        local kc = card(jobPage, 108, 4)
+        label(kc, "NYCKELORD (bakläge)", 10)
         local kb = new("TextBox", {
-            Size = UDim2.new(1, -24, 0, 58), Position = UDim2.new(0, 12, 0, 28),
+            Size = UDim2.new(1, -24, 0, 56), Position = UDim2.new(0, 12, 0, 28),
             BackgroundColor3 = C.panel, BorderSizePixel = 0, Font = Enum.Font.Gotham,
             TextSize = 10, TextColor3 = C.text, TextWrapped = true,
             ClearTextOnFocus = false, Text = table.concat(state.job.keywords, ", "),
         }, kc)
         corner(kb, 7)
-
         track(kb.FocusLost:Connect(function()
             local out = {}
             for w in string.gmatch(kb.Text:lower(), "[^,%s]+") do
@@ -1292,17 +1395,17 @@ local function buildGUI()
                 state.job.keywords = out
                 table.clear(cooldown)
                 saveConfig()
-                notify(#out .. " nyckelord sparade", "good")
+                notify(#out .. " nyckelord", "good")
             end
         end))
 
-        local sc = card(jobPage, 84, 5)
+        local sc = card(jobPage, 120, 5)
         button(sc, {
-            label = "Läs av stationer", y = 10,
+            label = "Läs av stationer (bakläge)", y = 10,
             onClick = function()
                 stationCache = {}
                 local stations = scanStations(state.job.radius)
-                notify(string.format("%d stationer", #stations), #stations > 0 and "good" or "bad")
+                notify(#stations .. " stationer", #stations > 0 and "good" or "bad")
                 if #stations > 0 then
                     local parts = {}
                     for i = 1, math.min(4, #stations) do
@@ -1319,20 +1422,21 @@ local function buildGUI()
         button(sc, {
             label = "Diagnos", y = 46,
             onClick = function()
-                local lines = {}
-                table.insert(lines, "Modules: " .. tostring(pcall(function()
-                    return LP.PlayerScripts:FindFirstChild("Modules")
-                end) and "ja" or "nej"))
                 initBlox()
-                table.insert(lines, "Interaction: " .. (blox.interaction and "OK" or "SAKNAS"))
-                table.insert(lines, "JobHandler: " .. (blox.job and "OK" or "SAKNAS"))
                 local ui = getInteractUI()
-                table.insert(lines, "_interactUI: " .. (ui and (ui:GetDescendants() and #ui:GetDescendants() .. " barn" or "tom") or "SAKNAS"))
-                local n = 0
-                pcall(function() n = blox.job and blox.job:GetJob() or "inget" end)
-                table.insert(lines, "jobb: " .. tostring(n))
-                table.insert(lines, "delar i radie: " .. #nearbyParts(state.job.radius))
-                jset(table.concat(lines, " · "), blox.interaction ~= nil)
+                local jb = "—"
+                pcall(function() jb = tostring(blox.job and blox.job:GetJob() or "inget") end)
+                jset(string.format("interaktion:%s · jobbmodul:%s · _interactUI:%s · jobb:%s",
+                    blox.interaction and "OK" or "NEJ",
+                    blox.job and "OK" or "NEJ",
+                    ui and "OK" or "NEJ", jb), blox.interaction ~= nil)
+            end,
+        })
+        button(sc, {
+            label = "Testa teleport till pizzerian", y = 82,
+            onClick = function()
+                teleportTo(PIZZA_SPOT)
+                notify("Teleport", "good")
             end,
         })
 
@@ -1341,8 +1445,9 @@ local function buildGUI()
             Size = UDim2.new(1, -24, 1, -18), Position = UDim2.new(0, 12, 0, 10),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Läser spelets egen meny. Tryck Diagnos först om inget hittas, "
-                .. "sedan Läs av stationer och skriv nyckelord som matchar namnen du ser.",
+            Text = "Lev.: hämtar låda vid bandet, teleporterar till kund, ger pizzan, "
+                .. "teleporterar tillbaka. Kräver att du har leveransjobbet. "
+                .. "Fungerar inte teleporten, säg till — då är koordinaterna fel.",
         }, nc)
     end
 
@@ -1670,10 +1775,7 @@ local function buildGUI()
         for i, fn in ipairs(stages) do
             if myGen ~= generation then return end
             local ok, e = pcall(fn)
-            if not ok then
-                warn("[Venice] steg " .. i .. ": " .. tostring(e))
-                jset("Steg " .. i .. " fel: " .. tostring(e), false)
-            end
+            if not ok then warn("[Venice] steg " .. i .. ": " .. tostring(e)) end
             task.wait(0.05)
         end
         if myGen ~= generation then return end
@@ -1692,18 +1794,21 @@ local function buildGUI()
         task.spawn(function()
             local n = 0
             while gui.Parent do
-                local iv = 0.4
-                pcall(function() iv = math.max(tonumber(state.job.interval) or 0.4, 0.15) end)
+                local iv = 0.6
+                pcall(function() iv = math.max(tonumber(state.job.interval) or 0.6, 0.2) end)
                 task.wait(iv)
                 n += 1
                 if state.job.enabled then
-                    local ok, e = pcall(pizzaStep)
-                    if not ok then jset("Pizza-fel: " .. tostring(e), false) end
+                    local ok, e = pcall(jobStep)
+                    if not ok then jset("Jobbfel: " .. tostring(e), false) end
                 end
-                if n % 8 == 0 and jobJob and jobJob.Parent and blox.job then
-                    local okj, j = pcall(function() return blox.job:GetJob() end)
-                    jobJob.Text = "jobb: " .. (okj and tostring(j) or "—")
-                    jobJob.TextColor3 = okj and j and C.good or C.dim
+                if n % 10 == 0 and jobJob and jobJob.Parent then
+                    if blox.job then
+                        local okj, j = pcall(function() return blox.job:GetJob() end)
+                        jobJob.Text = "jobb: " .. (okj and tostring(j) or "—")
+                    else
+                        jobJob.Text = "jobb: modul saknas"
+                    end
                 end
             end
         end)
@@ -1715,7 +1820,7 @@ local function buildGUI()
         end))
 
         tabs.Player.MouseButton1Click:Fire()
-        notify("Venice v2.0 · " .. state.ui.keybind.Name .. " visar", "good")
+        notify("Venice v2.1 · " .. state.ui.keybind.Name .. " visar", "good")
         log("12 klar")
     end)
 end
@@ -1724,15 +1829,9 @@ rebuild = function()
     teardown()
     task.wait(0.05)
     local ok, e = pcall(buildGUI)
-    if not ok then
-        warn("[Venice] rebuild: " .. tostring(e))
-        buildFallback(e)
-    end
+    if not ok then warn("[Venice] rebuild: " .. tostring(e)) end
 end
 
 pcall(bindSharedInput)
 local okB, errB = pcall(buildGUI)
-if not okB then
-    warn("[Venice] BYGGE MISSLYCKADES: " .. tostring(errB))
-    buildFallback(errB)
-end
+if not okB then warn("[Venice] BYGGE MISSLYCKADES: " .. tostring(errB)) end
