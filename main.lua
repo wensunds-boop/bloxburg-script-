@@ -1,14 +1,12 @@
 --!nocheck
 --[[=====================================================================
-  Venice Speed Suite  v3.0  ·  Bloxburg
+  Venice Speed Suite  v3.1  ·  Bloxburg
   Author: Venice · MIT
   ---------------------------------------------------------------------
-  v3.0
-    · leveransmotor efter spelets egen logik: hookar InvokeServer för att
-      fånga kunden, hämtar låda vid bandet, pivot till kund, "Give",
-      pivot tillbaka, med spelets 18/36 s-takt
-    · inga nyckelord — sekvensen är fast
-  Kräver hookmetamethod, getnamecallmethod, firesignal, setthreadidentity.
+  v3.1
+    · hookmetamethod letas i global och getgenv, installeras vid start
+    · reservväg utan hook: hittar kund genom att prova "Give"
+    · ärlig diagnos: skiljer på om funktionen finns och om den installerats
   CLIENT-SIDE ONLY. Kicken är lokal.
 =====================================================================]]
 
@@ -29,6 +27,12 @@ local function ident(n) if setthreadidentity then pcall(setthreadidentity, n) en
 local function fireSignal(sig)
     if type(firesignal) == "function" then return (pcall(firesignal, sig)) end
     return (pcall(function() sig:Fire() end))
+end
+local function genv(k)
+    if type(getgenv) ~= "function" then return nil end
+    local ok, g = pcall(getgenv)
+    if ok and type(g) == "table" then return g[k] end
+    return nil
 end
 
 --=====================================================================
@@ -352,7 +356,7 @@ local function buildGUI()
     new("TextLabel", {
         Size = UDim2.new(1, -110, 0, 12), Position = UDim2.new(0, 16, 0, 28),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "Bloxburg · v3.0",
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, Text = "Bloxburg · v3.1",
     }, header)
 
     local status = new("TextLabel", {
@@ -667,9 +671,7 @@ local function buildGUI()
         if model then return model, hum.SeatPart end
         local seat = hum.SeatPart
         if not seat then return nil end
-        local m = seat:FindFirstAncestorOfClass("Model")
-        if not m then return nil end
-        return m, seat
+        return seat:FindFirstAncestorOfClass("Model"), seat
     end
 
     local function pickPrimary(model, seat)
@@ -792,22 +794,6 @@ local function buildGUI()
         local rate = inc and state.vehicle.accel or state.vehicle.brake
         local step = math.clamp(desired - fs, -rate * dt, rate * dt)
         local engaged = math.abs(step) > 0.01
-        if engaged and inc and not assist.direct then
-            if assist.probe == 0 then
-                assist.probe, assist.probeFrom = 0.0001, fs
-            else
-                assist.probe += dt
-                if assist.probe > 1 then
-                    if math.abs(fs - assist.probeFrom) < 2 then
-                        assist.direct = true
-                        notify("Assist: byter metod", "bad")
-                    end
-                    assist.probe = 0
-                end
-            end
-        elseif not inc then
-            assist.probe = 0
-        end
         if not assist.direct and ensureRig(primary) then
             rig.force.LineDirection = fwd
             rig.force.LineVelocity = fs + step
@@ -823,6 +809,7 @@ local function buildGUI()
     -- leverans ------------------------------------------------------
     local customer = nil
     local hooked = false
+    local hookErr = ""
     local jobStatus, jobCount
     local done = 0
     local jobRunning = false
@@ -841,26 +828,45 @@ local function buildGUI()
         return nil
     end
 
+    local function hookFn()
+        local f = hookmetamethod
+        if type(f) ~= "function" then f = genv("hookmetamethod") end
+        return f
+    end
+
     local function installHook()
-        if hooked or type(hookmetamethod) ~= "function" then return hooked end
-        hooked = true
-        local old
-        old = hookmetamethod(game, "__namecall", function(...)
-            local method = getnamecallmethod and getnamecallmethod() or ""
-            if method == "InvokeServer" then
-                local tb = debug.traceback()
-                if type(tb) == "string" and tb:find("JobHandler.PizzaPlanetDelivery", 1, true) then
-                    local args = { ... }
-                    local a2 = args[2]
-                    if a2 and typeof(a2) == "Instance" and a2:FindFirstChild("Box") then
-                        local res = old(...)
-                        customer = res
-                        return res
+        if hooked then return true end
+        local hmm = hookFn()
+        if type(hmm) ~= "function" then
+            hookErr = "hookmetamethod saknas"
+            return false
+        end
+        local ok, e = pcall(function()
+            local old
+            old = hmm(game, "__namecall", function(...)
+                if checkcaller and checkcaller() then return old(...) end
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if method == "InvokeServer" then
+                    local tb = debug.traceback()
+                    if type(tb) == "string"
+                        and tb:find("JobHandler.PizzaPlanetDelivery", 1, true) then
+                        local args = { ... }
+                        local a2 = args[2]
+                        if a2 and typeof(a2) == "Instance" and a2:FindFirstChild("Box") then
+                            local res = old(...)
+                            customer = res
+                            return res
+                        end
                     end
                 end
-            end
-            return old(...)
+                return old(...)
+            end)
         end)
+        if not ok then
+            hookErr = tostring(e)
+            return false
+        end
+        hooked = true
         return true
     end
 
@@ -877,7 +883,7 @@ local function buildGUI()
     end
 
     local function isWorking()
-        if not initBlox() or not blox.job then return false end
+        if not initBlox() or not blox.job then return false, nil end
         local ok, j = pcall(function()
             ident(2)
             local n = blox.job:GetJob()
@@ -894,11 +900,14 @@ local function buildGUI()
         if not loc then return nil end
         local ok, model = pcall(function() return loc.PizzaPlanet.DeliveryMoped end)
         if not ok or not model then return nil end
-        local root = getRoot()
-        if root and (root.Position - model.PrimaryPart.Position).Magnitude > 6 then
-            local char = LP.Character
-            if char then pcall(function() char:PivotTo(CFrame.new(model.PrimaryPart.Position + Vector3.new(0, 4, 0))) end) end
-            task.wait(0.2)
+        local root, char = getRoot(), LP.Character
+        if root and char and model.PrimaryPart then
+            if (root.Position - model.PrimaryPart.Position).Magnitude > 6 then
+                pcall(function()
+                    char:PivotTo(CFrame.new(model.PrimaryPart.Position + Vector3.new(0, 4, 0)))
+                end)
+                task.wait(0.2)
+            end
         end
         for _ = 1, 12 do
             quickInteract(model, "Use")
@@ -922,6 +931,44 @@ local function buildGUI()
         return false
     end
 
+    -- reserv utan hook: prova "Give" på kandidater
+    local function giveProbe()
+        local root = getRoot()
+        if not root then return false end
+        local list = {}
+        pcall(function()
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if d:IsA("Model") and d.Name:lower():find("customer", 1, true) then
+                    local p = d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart")
+                    if p then table.insert(list, { model = d, part = p }) end
+                end
+            end
+        end)
+        if #list == 0 then return false end
+        table.sort(list, function(a, b)
+            return (a.part.Position - root.Position).Magnitude
+                < (b.part.Position - root.Position).Magnitude
+        end)
+        for i = 1, math.min(12, #list) do
+            if not state.job.enabled then return false end
+            local c = list[i]
+            local char = LP.Character
+            if char then
+                pcall(function() char:PivotTo(CFrame.new(c.part.Position + Vector3.new(0, 4, 0))) end)
+                task.wait(0.15)
+            end
+            quickInteract(c.model, "Give", c.part)
+            task.wait(0.2)
+            if not hasBox() then
+                done += 1
+                if jobCount and jobCount.Parent then jobCount.Text = done .. " leveranser" end
+                jset("Gav pizza (reservväg)", true)
+                return true
+            end
+        end
+        return false
+    end
+
     local function waitUntil(t0, seconds)
         while os.clock() - t0 < seconds do
             if not state.job.enabled then return false end
@@ -933,7 +980,7 @@ local function buildGUI()
 
     local function cycle()
         if not initBlox() then jset("Moduler saknas", false); return end
-        local working, j = isWorking()
+        local working = isWorking()
         if not working then
             if blox.job then
                 pcall(function() ident(2); blox.job:GoToWork(JOB); ident(0) end)
@@ -941,12 +988,12 @@ local function buildGUI()
                 jset("Startar passet…", true)
                 return
             end
-            jset("Inget jobb och ingen jobbmodul", false)
+            jset("Inget jobb, ingen jobbmodul", false)
             return
         end
 
         local moped = claimMoped()
-        if not moped then jset("Kunde inte hämta mopeden", false); return end
+        if not moped then jset("Kunde inte hämta moped", false); return end
 
         customer = nil
         pcall(function() moped:PivotTo(INSIDE) end)
@@ -955,29 +1002,35 @@ local function buildGUI()
         for _ = 1, 15 do
             if not state.job.enabled then return end
             grabBox()
-            if customer ~= nil then break end
+            if hasBox() then break end
             task.wait(0.3)
         end
-        if customer == nil then jset("Fick ingen kund", false); return end
         if not hasBox() then jset("Fick ingen låda", false); return end
 
         local t0 = os.clock()
         local root = getRoot()
+
+        if not customer then
+            jset("Ingen kund via hook — provar direkt", true)
+            if not giveProbe() then jset("Hittade ingen kund", false) end
+            pcall(function() moped:PivotTo(INSIDE) end)
+            if root then pcall(function() root.Anchored = false end) end
+            return
+        end
+
         pcall(function() moped:PivotTo(CFrame.new(UNDER)) end)
         task.wait(0.2)
-
         local okc, croot = pcall(function() return customer.HumanoidRootPart end)
         if not okc or not croot then jset("Kund utan root", false); return end
-        local target = croot.CFrame - Vector3.new(0, 45, 0)
-        pcall(function() moped:PivotTo(target) end)
+        pcall(function() moped:PivotTo(croot.CFrame - Vector3.new(0, 45, 0)) end)
 
         if root then pcall(function() root.Anchored = true end) end
         if not waitUntil(t0, 18) then
             if root then pcall(function() root.Anchored = false end) end
             return
         end
-
         if root then pcall(function() root.Anchored = false end) end
+
         for _ = 1, 12 do
             if not state.job.enabled then return end
             pcall(function() moped:PivotTo(croot.CFrame - Vector3.new(0, 5, 0)) end)
@@ -987,11 +1040,9 @@ local function buildGUI()
         end
 
         if hasBox() then jset("Kunde inte lämna pizzan", false); return end
-
         done += 1
         if jobCount and jobCount.Parent then jobCount.Text = done .. " leveranser" end
 
-        pcall(function() moped:PivotTo(croot.CFrame - Vector3.new(0, 45, 0)) end)
         pcall(function() moped:PivotTo(CFrame.new(UNDER)) end)
         if root then pcall(function() root.Anchored = true end) end
         waitUntil(t0, 36)
@@ -1160,7 +1211,7 @@ local function buildGUI()
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
             Text = "Hämtar moped, tar låda, pivot till kund, ger pizzan, pivot "
-                .. "tillbaka. Kunden fångas via spelets eget svar.",
+                .. "tillbaka. Utan hook provas kunder direkt.",
         }, c)
         jobStatus = label(c, "redo", 96, 9, C.dim)
         jobCount = label(c, "0 leveranser", 112, 9, C.good)
@@ -1191,15 +1242,15 @@ local function buildGUI()
         button(wc, {
             label = "Diagnos", y = 82,
             onClick = function()
-                initBlox()
+                local hmm = hookFn()
                 local working, j = isWorking()
-                local loc = locations()
-                jset(string.format("interaktion:%s jobbmodul:%s jobb:%s platser:%s hook:%s",
+                jset(string.format("hook-fn:%s · installerad:%s · interaktion:%s · jobb:%s",
+                    type(hmm) == "function" and "OK" or "NEJ",
+                    hooked and "OK" or "NEJ",
                     blox.interaction and "OK" or "NEJ",
-                    blox.job and "OK" or "NEJ",
-                    tostring(j or "inget"),
-                    loc and "OK" or "NEJ",
-                    hooked and "OK" or "NEJ"), blox.interaction ~= nil and working)
+                    tostring(j or "inget")),
+                    type(hmm) == "function" or blox.interaction ~= nil)
+                if hookErr ~= "" then notify("hook: " .. hookErr, "bad") end
             end,
         })
 
@@ -1208,8 +1259,8 @@ local function buildGUI()
             Size = UDim2.new(1, -24, 1, -18), Position = UDim2.new(0, 12, 0, 10),
             BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 9,
             TextWrapped = true, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "Kör Diagnos först. Kräver leveransjobbet. Varje leverans tar "
-                .. "36 s eftersom spelet räknar så — det går inte att skynda på.",
+            Text = "Kör Diagnos först. Kräver leveransjobbet. 36 s per leverans är "
+                .. "spelets egen takt och går inte att skynda på.",
         }, nc)
     end
 
@@ -1509,27 +1560,22 @@ local function buildGUI()
         }
         for i, fn in ipairs(stages) do
             if myGen ~= generation then return end
-            local ok, e = pcall(fn)
-            if not ok then warn("[Venice] steg " .. i .. ": " .. tostring(e)) end
+            pcall(fn)
             task.wait(0.05)
         end
         if myGen ~= generation then return end
         log("11 klar")
 
         track(RunService.Heartbeat:Connect(function(dt)
-            local ok = pcall(function()
-                applyPlayer(); applyVehicle(dt)
-            end)
-            if not ok then end
+            pcall(function() applyPlayer(); applyVehicle(dt) end)
         end))
-
         track(LP.CharacterAdded:Connect(function()
             task.wait(0.6); resetAssist()
         end))
 
+        installHook()
         tabs.Player.MouseButton1Click:Fire()
-        notify("Venice v3.0 · " .. state.ui.keybind.Name, "good")
-
+        notify("Venice v3.1 · " .. state.ui.keybind.Name, "good")
         if state.job.enabled then startJobLoop() end
     end)
 end
