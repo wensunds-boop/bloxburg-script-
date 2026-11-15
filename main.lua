@@ -1,6 +1,6 @@
 --!nocheck
--- VeniceSpeedSuite v3.7  |  Bloxburg
--- Rekursiv detektering + världsskanner.
+-- VeniceSpeedSuite v3.8  |  Bloxburg
+-- Karaktärsstyrd leverans: följer den gula pilen.
 
 local Players            = game:GetService("Players")
 local RunService         = game:GetService("RunService")
@@ -8,7 +8,6 @@ local UserInputService   = game:GetService("UserInputService")
 local HttpService        = game:GetService("HttpService")
 local VirtualUser        = game:GetService("VirtualUser")
 local StarterGui         = game:GetService("StarterGui")
-local PathfindingService = game:GetService("PathfindingService")
 local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 
 local lp = Players.LocalPlayer
@@ -23,11 +22,6 @@ S.dead = false
 local stale = pg:FindFirstChild("VeniceSuite")
 if stale then stale:Destroy() end
 
-local function nc(f)
-    local n = rawget(G, "newcclosure") or newcclosure
-    if type(n) == "function" then local ok, r = pcall(n, f); if ok then return r end end
-    return f
-end
 local function gfn(name)
     local f = rawget(G, name)
     if type(f) == "function" then return f end
@@ -58,7 +52,7 @@ local CFG = {
     walk = 32, walkOn = true,
     vehMax = 220, vehOn = false,
     zoneLimit = 60, zoneOn = false,
-    farmOn = false, autoDeliver = true, walkMode = true,
+    farmOn = false, farmSpeed = 42,
 }
 
 local function saveCfg()
@@ -99,8 +93,7 @@ local win = mk("Frame", {
 }, gui)
 
 local top = mk("Frame", {
-    Size = UDim2.new(1, 0, 0, 46),
-    BackgroundColor3 = Color3.fromRGB(24, 24, 28),
+    Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = Color3.fromRGB(24, 24, 28),
     BorderSizePixel = 0, Active = true, ZIndex = 20,
 }, win)
 
@@ -118,7 +111,7 @@ mk("TextLabel", {
     Size = UDim2.new(1, -180, 1, 0), Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15,
     TextColor3 = Color3.fromRGB(235, 235, 240), TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "VENICE SUITE  v3.7", ZIndex = 21,
+    Text = "VENICE SUITE  v3.8", ZIndex = 21,
 }, top)
 
 local activeLabel = mk("TextLabel", {
@@ -380,6 +373,7 @@ local function applyWalk()
 end
 
 RunService.Heartbeat:Connect(function()
+    if CFG.farmOn then return end
     if not CFG.walkOn then return end
     local h = hum()
     if h and math.abs(h.WalkSpeed - CFG.walk) > 0.6 then h.WalkSpeed = CFG.walk end
@@ -389,7 +383,7 @@ slider(pPlayer, "Gånghastighet", 16, 200, CFG.walk, function(v) CFG.walk = v; a
 toggle(pPlayer, "Gånghastighet på", CFG.walkOn, function(v) CFG.walkOn = v; applyWalk() end)
 
 ------------------------------------------------------------
--- FORDON (bred detektering)
+-- FORDON
 ------------------------------------------------------------
 local vehLabel = readout(pVeh, "Status", "Inget fordon")
 local seatCache, seatScanAt = nil, 0
@@ -542,12 +536,12 @@ local diagLabel = mk("TextLabel", {
 local diag = {}
 local function diagDraw()
     diagLabel.Text = table.concat({
+        "pil: " .. tostring(diag.arrow or "ingen"),
+        "pilavst: " .. tostring(diag.arrowDist or "-"),
+        "fas: " .. tostring(diag.phase or "-"),
+        "pizza i hand: " .. tostring(diag.held and "ja" or "nej"),
         "pizzaplanet: " .. tostring(diag.pp or "-"),
         "conveyor: " .. tostring(diag.conv or "-"),
-        "box: " .. tostring(diag.box or 0),
-        "säte: " .. tostring(diag.seat or "-"),
-        "remotes: " .. tostring(diag.remotes or "-"),
-        "kund: " .. tostring(diag.cust or "-"),
         "fel: " .. tostring(diag.err or "-"),
     }, "\n")
 end
@@ -556,15 +550,12 @@ local statusLabel = readout(pJob, "Status", "redo")
 local function status(t) statusLabel.Text = t end
 
 ------------------------------------------------------------
--- SPELLAGER
+-- PIZZAPLANET
 ------------------------------------------------------------
-local blox = { takeFn = nil, deliverEv = {}, uiMode = "none" }
-
 local function pizzaPlanet()
     local direct = workspace:FindFirstChild("PizzaPlanet")
     if direct then return direct end
-    local hits = deepFind(workspace, function(i) return nameHas(i, "pizzaplanet") end, 6)
-    return hits[1]
+    return deepFind(workspace, function(i) return nameHas(i, "pizzaplanet") end, 6)[1]
 end
 
 local function conveyor()
@@ -574,29 +565,8 @@ local function conveyor()
         if mb then return mb end
         local c = deepFind(pp, function(i) return nameHas(i, "conveyor") end, 7)[1]
         if c then return c end
-        local b = deepFind(pp, function(i) return nameHas(i, "pizzabox", "pizza box") end, 7)[1]
-        if b then return b.Parent end
     end
     return deepFind(workspace, function(i) return i.Name == "MovingBoxes" end, 7)[1]
-end
-
-local function boxCount()
-    local mb = conveyor()
-    if not mb then return 0 end
-    local n = 0
-    for _, d in ipairs(mb:GetChildren()) do
-        if d:IsA("Model") or d:IsA("BasePart") then n = n + 1 end
-    end
-    return n
-end
-
-local function firstBox()
-    local mb = conveyor()
-    if not mb then return nil end
-    for _, d in ipairs(mb:GetChildren()) do
-        if d:IsA("Model") or d:IsA("BasePart") then return d end
-    end
-    return nil
 end
 
 local function heldBox()
@@ -610,62 +580,59 @@ local function heldBox()
     return nil
 end
 
-local function scanRemotes()
-    local fn, ev = {}, {}
-    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-        if d:IsA("RemoteFunction") then table.insert(fn, d)
-        elseif d:IsA("RemoteEvent") then table.insert(ev, d) end
-    end
-    local function score(x)
-        local n = x.Name:lower()
-        if n == "datafunction" or n == "dataevent" then return 0 end
-        if n:find("data") then return 1 end
-        if n:find("job") or n:find("pizza") or n:find("item") then return 2 end
-        return 3
-    end
-    table.sort(fn, function(a, b) return score(a) < score(b) end)
-    table.sort(ev, function(a, b) return score(a) < score(b) end)
-    blox.takeFn = fn[1]
-    blox.deliverEv = ev
-    diag.remotes = #fn .. "/" .. #ev
+------------------------------------------------------------
+-- PILEN
+------------------------------------------------------------
+local arrowCache, arrowAt = nil, 0
+
+local function isYellow(part)
+    local c = part.Color
+    return c.R > 0.6 and c.G > 0.5 and c.B < 0.45
 end
 
-local function takeBoxViaRemote(box)
-    local fns = {}
-    if blox.takeFn then table.insert(fns, blox.takeFn) end
-    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-        if d:IsA("RemoteFunction") and d ~= blox.takeFn then table.insert(fns, d) end
-    end
-    for _, f in ipairs(fns) do
-        for _, arg in ipairs({ { Type = "TakePizzaBox", Box = box }, { "TakePizzaBox", box } }) do
-            local ok, res = pcall(function() return f:InvokeServer(arg) end)
-            if ok and typeof(res) == "Instance" then
-                blox.uiMode = "remote:" .. f.Name
-                return res
-            end
-            task.wait(0.1)
+local function findArrow()
+    local r = root()
+    if not r then return nil end
+    if tick() - arrowAt < 0.3 and arrowCache and arrowCache.Parent then return arrowCache end
+    arrowAt = tick()
+
+    local cands = deepFind(workspace, function(i)
+        if i:IsA("BasePart") then
+            if nameHas(i, "arrow", "delivery", "marker", "waypoint", "pointer", "indicator") then return true end
+            if isYellow(i) and (i.Transparency > 0.15 or not i.CanCollide) then return true end
+        elseif i:IsA("Beam") or i:IsA("BillboardGui") or i:IsA("Trail") then
+            if nameHas(i, "arrow", "delivery", "marker") then return true end
+        end
+        return false
+    end, 8)
+
+    local best, bestD = nil, 800
+    for _, c in ipairs(cands) do
+        local pos
+        if c:IsA("BasePart") then pos = c.Position
+        elseif c:IsA("Model") then
+            local p = c:FindFirstChildWhichIsA("BasePart", true)
+            pos = p and p.Position
+        end
+        if pos then
+            local d = (pos - r.Position).Magnitude
+            if d < bestD then best, bestD = c, d end
         end
     end
-    return nil
+    arrowCache = best
+    return best
 end
 
-local function deliverViaRemote(customer)
-    local sent = false
-    for _, ev in ipairs(blox.deliverEv) do
-        if pcall(function() ev:FireServer({ Type = "DeliverPizza", Customer = customer }) end) then sent = true end
-    end
-    if sent then blox.uiMode = "remote" end
-    return sent
+local function arrowPos(a)
+    if not a then return nil end
+    if a:IsA("BasePart") then return a.Position end
+    local p = a:FindFirstChildWhichIsA("BasePart", true)
+    return p and p.Position
 end
 
-local function dropLeftover()
-    local b = heldBox()
-    if not b then return end
-    for _, ev in ipairs(blox.deliverEv) do
-        pcall(function() ev:FireServer({ Item = b, Type = "UnequipItem" }) end)
-    end
-end
-
+------------------------------------------------------------
+-- INTERAKTION
+------------------------------------------------------------
 local function fireButton(btn)
     if not btn or not btn:IsA("GuiButton") or not btn.Visible then return false end
     local gc = gfn("getconnections")
@@ -706,130 +673,92 @@ local function interactUI()
     return n
 end
 
-local function walkTo(pos, timeout)
-    local h, r = hum(), root()
-    if not h or not r or not pos then return false end
-    local path = PathfindingService:CreatePath({
-        AgentRadius = 2, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6,
-    })
-    local ok = pcall(function() path:ComputeAsync(r.Position, pos) end)
-    if not ok or path.Status ~= Enum.PathStatus.Success then
-        h:MoveTo(pos)
-        task.wait(1)
-        return false
-    end
-    local deadline = tick() + (timeout or 25)
-    for _, wp in ipairs(path:GetWaypoints()) do
-        if tick() > deadline then break end
-        if wp.Action == Enum.PathWaypointAction.Jump then
-            pcall(function() h:ChangeState(Enum.HumanoidStateType.Jumping) end)
-        end
-        h:MoveTo(wp.Position)
-        repeat
-            task.wait(0.1)
-        until (r.Position - wp.Position).Magnitude < 5 or tick() > deadline
-    end
-    return true
+------------------------------------------------------------
+-- STYRNING
+------------------------------------------------------------
+local function steer(target, jump)
+    local h = hum()
+    if not h then return end
+    h:MoveTo(target)
+    if jump then pcall(function() h:ChangeState(Enum.HumanoidStateType.Jumping) end) end
 end
 
-local function tp(target, steps)
+local function walkToPoint(pos, timeout)
     local r = root()
-    if not r or not target then return end
-    steps = steps or 5
-    local start = r.Position
-    for i = 1, steps do
-        local dest = start:Lerp(target, i / steps)
-        pcall(function() r.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0)) end)
-        task.wait(0.06)
-    end
-    pcall(function() r.AssemblyLinearVelocity = Vector3.zero end)
-end
-
-local function goTo(pos, timeout)
-    if CFG.walkMode then
-        local ok = walkTo(pos, timeout)
-        if not ok and root() then tp(pos, 4) end
-    else
-        tp(pos, 4)
-    end
-end
-
-local function removeMoped()
-    local c = lp.Character
-    if not c then return end
-    local m = c:FindFirstChild("Delivery Moped")
-    if m then pcall(function() m:Destroy() end) end
-end
-
-------------------------------------------------------------
--- VÄRLDSSKANNER
-------------------------------------------------------------
-local scanBox = mk("TextBox", {
-    Size = UDim2.new(1, 0, 0, 300),
-    BackgroundColor3 = Color3.fromRGB(14, 14, 17),
-    BorderSizePixel = 0,
-    Font = Enum.Font.Code,
-    TextSize = 10,
-    TextColor3 = Color3.fromRGB(190, 190, 205),
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top,
-    TextWrapped = true,
-    ClearTextOnFocus = false,
-    TextEditable = true,
-    MultiLine = true,
-    Text = "tryck Skanna världen",
-    LayoutOrder = 2,
-    ZIndex = 7,
-}, card(pJob, "Skannerapport", 340))
-
-local function scanWorld()
-    local out = {}
-    local function add(s) if #out < 120 then table.insert(out, s) end end
-
-    add("== workspace-barn ==")
-    local kids = workspace:GetChildren()
-    for i = 1, math.min(#kids, 40) do
-        add("  " .. kids[i].ClassName .. " : " .. kids[i].Name)
-    end
-    add("  antal: " .. #kids)
-
-    add("== pizza-träffar ==")
-    local hits = deepFind(workspace, function(i) return nameHas(i, "pizza") end, 8)
-    add("  antal: " .. #hits)
-    for i = 1, math.min(#hits, 30) do
-        add("  " .. hits[i]:GetFullName() .. " [" .. hits[i].ClassName .. "]")
-    end
-
-    add("== conveyor-träffar ==")
-    local cv = deepFind(workspace, function(i) return nameHas(i, "conveyor", "movingboxes", "box") end, 8)
-    add("  antal: " .. #cv)
-    for i = 1, math.min(#cv, 25) do
-        add("  " .. cv[i]:GetFullName() .. " [" .. cv[i].ClassName .. "]")
-    end
-
-    add("== locations ==")
-    local env = workspace:FindFirstChild("Environment")
-    local locs = env and env:FindFirstChild("Locations")
-    if locs then
-        for i, d in ipairs(locs:GetChildren()) do
-            if i > 30 then break end
-            add("  " .. d.Name)
+    if not r or not pos then return false end
+    local deadline = tick() + (timeout or 30)
+    local lastPos, lastAt = r.Position, tick()
+    while tick() < deadline and CFG.farmOn do
+        local rr = root()
+        if not rr then return false end
+        if (rr.Position - pos).Magnitude < 8 then return true end
+        steer(pos, false)
+        if tick() - lastAt > 1.5 then
+            if (rr.Position - lastPos).Magnitude < 3 then
+                steer(pos + Vector3.new(math.random(-8, 8), 0, math.random(-8, 8)), true)
+            end
+            lastPos, lastAt = rr.Position, tick()
         end
-    else
-        add("  Environment.Locations saknas")
+        task.wait(0.12)
     end
+    return false
+end
 
-    add("== karaktär ==")
-    local c = lp.Character
-    if c then
-        for _, d in ipairs(c:GetChildren()) do add("  " .. d.ClassName .. " : " .. d.Name) end
-        local h = c:FindFirstChildOfClass("Humanoid")
-        add("  SeatPart: " .. (h and h.SeatPart and h.SeatPart:GetFullName() or "nil"))
-    else
-        add("  ingen karaktär")
+-- Följer pilen. Returnerar true när pizzan lämnats.
+local function followArrow(timeout)
+    local deadline = tick() + (timeout or 75)
+    local lastPos, lastAt = nil, tick()
+    local nextTry = 0
+
+    while tick() < deadline and CFG.farmOn and not S.dead do
+        if not heldBox() then return true end
+
+        local a = findArrow()
+        local r, h = root(), hum()
+        if not r or not h then return false end
+        if not a then
+            diag.arrow = "ingen"
+            diag.arrowDist = "-"
+            diagDraw()
+            return false
+        end
+
+        local ap = arrowPos(a)
+        if not ap then return false end
+        local dist = (ap - r.Position).Magnitude
+        diag.arrow = a.Name .. " [" .. a.ClassName .. "]"
+        diag.arrowDist = math.floor(dist)
+        diagDraw()
+
+        local target
+        if dist > 30 then
+            target = ap
+        else
+            local okLv, lv = pcall(function() return a.CFrame.LookVector end)
+            if okLv and lv and lv.Magnitude > 0.1 then
+                target = r.Position + lv.Unit * 35
+            else
+                target = ap
+            end
+            if tick() > nextTry then
+                nextTry = tick() + 1.4
+                interactUI()
+                if not heldBox() then return true end
+            end
+        end
+
+        steer(target, false)
+
+        if tick() - lastAt > 1.6 then
+            if lastPos and (r.Position - lastPos).Magnitude < 3 then
+                steer(target + Vector3.new(math.random(-8, 8), 0, math.random(-8, 8)), true)
+            end
+            lastPos, lastAt = r.Position, tick()
+        end
+
+        task.wait(0.14)
     end
-
-    scanBox.Text = table.concat(out, "\n")
+    return false
 end
 
 ------------------------------------------------------------
@@ -839,79 +768,133 @@ local farmRun = false
 local function farmLoop()
     if farmRun then return end
     farmRun = true
+
+    local savedWalk = CFG.walk
+    local h0 = hum()
+    if h0 then h0.WalkSpeed = CFG.farmSpeed end
+
     task.spawn(function()
         while CFG.farmOn and not S.dead do
             local ok, err = pcall(function()
-                local pp = pizzaPlanet()
-                local cv = conveyor()
-                diag.pp = pp and pp.Name or "saknas"
-                diag.conv = cv and cv:GetFullName() or "saknas"
-                diag.box = boxCount()
-                diag.seat = getSeat() and getSeat().Name or "-"
-                diag.cust = "-"
+                local hh = hum()
+                if hh then hh.WalkSpeed = CFG.farmSpeed end
+
+                diag.held = heldBox() ~= nil
                 diag.err = "-"
                 diagDraw()
 
-                removeMoped()
-
-                if pp and not heldBox() then
-                    local part = pp:FindFirstChildWhichIsA("BasePart", true)
-                    local r = root()
-                    if part and r and (part.Position - r.Position).Magnitude > 70 then
-                        status("går till Pizza Planet")
-                        goTo(part.Position, 30)
-                        task.wait(0.8)
-                    end
-                end
+                -- Ta bort mopeden så karaktären går fritt
+                local c = lp.Character
+                local moped = c and c:FindFirstChild("Delivery Moped")
+                if moped then pcall(function() moped:Destroy() end) end
 
                 if not heldBox() then
-                    local raw = firstBox()
-                    if raw then
-                        status("tar box")
-                        local customer = takeBoxViaRemote(raw)
-                        if customer then
-                            diag.cust = customer.Name
-                            diagDraw()
-                            local hrp = customer:FindFirstChild("HumanoidRootPart")
-                            if hrp and CFG.autoDeliver then
-                                status("går till " .. customer.Name)
-                                goTo(hrp.Position, 45)
-                                task.wait(0.4)
-                                if not deliverViaRemote(customer) then interactUI() end
-                                task.wait(1)
-                            end
-                        else
-                            status("remote nekade, klick")
-                            interactUI()
-                            task.wait(0.6)
+                    diag.phase = "till bandet"
+                    local mb = conveyor()
+                    local pp = pizzaPlanet()
+                    local targetPart = (mb and mb:FindFirstChildWhichIsA("BasePart", true))
+                        or (pp and pp:FindFirstChildWhichIsA("BasePart", true))
+                    diag.conv = mb and mb:GetFullName() or "saknas"
+                    diag.pp = pp and "finns" or "saknas"
+                    diagDraw()
+
+                    if targetPart then
+                        local r = root()
+                        if r and (targetPart.Position - r.Position).Magnitude > 12 then
+                            status("går till bandet")
+                            walkToPoint(targetPart.Position, 40)
                         end
-                    else
-                        status("ingen box hittad")
-                        interactUI()
-                        task.wait(0.6)
+                    end
+
+                    status("tar pizza")
+                    interactUI()
+                    task.wait(1.2)
+                    diag.held = heldBox() ~= nil
+                    diagDraw()
+                    if not heldBox() then
+                        diag.err = "fick ingen pizza"
+                        task.wait(2)
+                        return
                     end
                 end
 
-                dropLeftover()
+                diag.phase = "följer pil"
+                diagDraw()
+                status("följer pilen")
+
+                local delivered = followArrow(75)
+                diag.held = heldBox() ~= nil
+                diag.phase = delivered and "klar" or "misslyckad"
+                diagDraw()
+
+                if delivered then
+                    status("levererad")
+                    task.wait(1)
+                else
+                    status("leverans misslyckad")
+                    if heldBox() then
+                        interactUI()
+                        task.wait(1)
+                    end
+                end
             end)
             if not ok then diag.err = tostring(err) end
             diagDraw()
-            for _ = 1, 6 do
+            for _ = 1, 3 do
                 if not CFG.farmOn or S.dead then break end
                 task.wait(1)
             end
         end
         farmRun = false
         status("farm stoppad")
+        local h = hum()
+        if h then h.WalkSpeed = savedWalk end
     end)
 end
 
 ------------------------------------------------------------
--- JOBBKNAPPAR
+-- SKANNER
+------------------------------------------------------------
+local scanBox = mk("TextBox", {
+    Size = UDim2.new(1, 0, 0, 260),
+    BackgroundColor3 = Color3.fromRGB(14, 14, 17), BorderSizePixel = 0,
+    Font = Enum.Font.Code, TextSize = 10, TextColor3 = Color3.fromRGB(190, 190, 205),
+    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+    TextWrapped = true, ClearTextOnFocus = false, TextEditable = true, MultiLine = true,
+    Text = "tryck Skanna pil", LayoutOrder = 2, ZIndex = 7,
+}, card(pJob, "Pilrapport", 300))
+
+local function scanArrow()
+    local out = {}
+    local a = findArrow()
+    if not a then
+        scanBox.Text = "ingen pil hittad. Ta en pizza först — pilen syns bara med pizza i hand."
+        return
+    end
+    table.insert(out, "vald pil: " .. a:GetFullName())
+    table.insert(out, "klass: " .. a.ClassName)
+    table.insert(out, "avstånd: " .. math.floor((arrowPos(a) - root().Position).Magnitude))
+    if a:IsA("BasePart") then
+        table.insert(out, "färg: " .. tostring(a.Color))
+        table.insert(out, "transparens: " .. a.Transparency)
+        table.insert(out, "CanCollide: " .. tostring(a.CanCollide))
+    end
+    table.insert(out, "")
+    table.insert(out, "alla kandidater:")
+    local cands = deepFind(workspace, function(i)
+        return i:IsA("BasePart") and (nameHas(i, "arrow", "delivery", "marker") or isYellow(i))
+    end, 8)
+    for i = 1, math.min(#cands, 25) do
+        table.insert(out, "  " .. cands[i]:GetFullName() .. " [" .. cands[i].ClassName .. "]")
+    end
+    scanBox.Text = table.concat(out, "\n")
+end
+
+------------------------------------------------------------
+-- KNAPPAR
 ------------------------------------------------------------
 button(pJob, "Kontroll", "Starta farm", Color3.fromRGB(60, 110, 70), function()
     CFG.farmOn = true
-    scanRemotes()
     status("startar")
     farmLoop()
 end)
@@ -919,39 +902,38 @@ button(pJob, "Kontroll", "Stoppa", Color3.fromRGB(110, 55, 55), function()
     CFG.farmOn = false
     status("stoppad")
 end)
-button(pJob, "Test", "Skanna världen", Color3.fromRGB(50, 42, 95), function()
-    status("skannar")
-    scanWorld()
-    diag.pp = pizzaPlanet() and "finns" or "saknas"
-    diag.conv = conveyor() and "finns" or "saknas"
-    diag.box = boxCount()
-    diag.seat = getSeat() and getSeat().Name or "-"
+button(pJob, "Test", "Skanna pil", Color3.fromRGB(50, 42, 95), function()
+    scanArrow()
     diagDraw()
 end)
-button(pJob, "Test", "Ta en box (test)", Color3.fromRGB(50, 50, 60), function()
-    local raw = firstBox()
-    if not raw then status("inget på bandet"); return end
-    local c = takeBoxViaRemote(raw)
-    status(c and ("kund: " .. c.Name) or "remote nekade")
-    diag.cust = c and c.Name or "-"
-    diagDraw()
+button(pJob, "Test", "Följ pil 20s", Color3.fromRGB(50, 50, 60), function()
+    CFG.farmOn = true
+    local h = hum()
+    if h then h.WalkSpeed = CFG.farmSpeed end
+    task.spawn(function()
+        status("följer pilen (test)")
+        local ok = followArrow(20)
+        CFG.farmOn = false
+        status(ok and "levererad" or "test klar")
+        local hh = hum()
+        if hh then hh.WalkSpeed = CFG.walk end
+    end)
 end)
-toggle(pJob, "Gå istället för teleport", CFG.walkMode, function(v) CFG.walkMode = v end)
+slider(pJob, "Farmhastighet", 20, 90, CFG.farmSpeed, function(v) CFG.farmSpeed = v; saveCfg() end)
 
 ------------------------------------------------------------
 -- START
 ------------------------------------------------------------
 task.spawn(function()
     task.wait(0.4)
-    scanRemotes()
     diag.pp = pizzaPlanet() and "finns" or "saknas"
     diag.conv = conveyor() and "finns" or "saknas"
-    diag.box = boxCount()
+    diag.held = false
     diagDraw()
     status("redo")
     pcall(function()
         StarterGui:SetCore("SendNotification", {
-            Title = "Venice Suite v3.7",
+            Title = "Venice Suite v3.8",
             Text = "PizzaPlanet: " .. tostring(diag.pp) .. " | Conveyor: " .. tostring(diag.conv),
             Duration = 4,
         })
