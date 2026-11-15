@@ -1,15 +1,15 @@
 --!nocheck
--- VeniceSpeedSuite v3.6  |  Bloxburg
--- Leverans via DataFunction/DataEvent + PathfindingService (anti-teleport-vänlig).
+-- VeniceSpeedSuite v3.7  |  Bloxburg
+-- Rekursiv detektering + världsskanner.
 
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
-local HttpService       = game:GetService("HttpService")
-local VirtualUser       = game:GetService("VirtualUser")
-local StarterGui        = game:GetService("StarterGui")
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local HttpService        = game:GetService("HttpService")
+local VirtualUser        = game:GetService("VirtualUser")
+local StarterGui         = game:GetService("StarterGui")
 local PathfindingService = game:GetService("PathfindingService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 
 local lp = Players.LocalPlayer
 if not lp then return end
@@ -118,7 +118,7 @@ mk("TextLabel", {
     Size = UDim2.new(1, -180, 1, 0), Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15,
     TextColor3 = Color3.fromRGB(235, 235, 240), TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "VENICE SUITE  v3.6", ZIndex = 21,
+    Text = "VENICE SUITE  v3.7", ZIndex = 21,
 }, top)
 
 local activeLabel = mk("TextLabel", {
@@ -334,6 +334,31 @@ pages.Player.Visible = true
 tabs.Player.BackgroundColor3 = Color3.fromRGB(45, 38, 70)
 
 ------------------------------------------------------------
+-- SÖKHJÄLP
+------------------------------------------------------------
+local function nameHas(inst, ...)
+    local ok, n = pcall(function() return inst.Name:lower() end)
+    if not ok or not n then return false end
+    for _, s in ipairs({ ... }) do if n:find(s, 1, true) then return true end end
+    return false
+end
+
+local function deepFind(from, pred, maxDepth)
+    local out = {}
+    local function rec(inst, d)
+        if d > (maxDepth or 6) then return end
+        local ok, kids = pcall(function() return inst:GetChildren() end)
+        if not ok then return end
+        for _, c in ipairs(kids) do
+            if pcall(pred, c) then table.insert(out, c) end
+            rec(c, d + 1)
+        end
+    end
+    rec(from, 0)
+    return out
+end
+
+------------------------------------------------------------
 -- KARAKTÄR
 ------------------------------------------------------------
 local function char()
@@ -364,25 +389,29 @@ slider(pPlayer, "Gånghastighet", 16, 200, CFG.walk, function(v) CFG.walk = v; a
 toggle(pPlayer, "Gånghastighet på", CFG.walkOn, function(v) CFG.walkOn = v; applyWalk() end)
 
 ------------------------------------------------------------
--- FORDON
+-- FORDON (bred detektering)
 ------------------------------------------------------------
 local vehLabel = readout(pVeh, "Status", "Inget fordon")
+local seatCache, seatScanAt = nil, 0
 
 local function getSeat()
     local c = lp.Character
     if not c then return nil end
-    for _, d in ipairs(c:GetDescendants()) do
-        if d:IsA("VehicleSeat") then return d end
-    end
     local h = c:FindFirstChildOfClass("Humanoid")
-    local s = h and h.SeatPart
-    if s and s:IsA("VehicleSeat") then return s end
-    for _, d in ipairs(c:GetChildren()) do
-        if d.Name:sub(1, 8) == "Vehicle_" then
-            local s2 = d:FindFirstChildOfClass("VehicleSeat")
-            if s2 then return s2 end
+    if h and h.SeatPart then return h.SeatPart end
+    local s = c:FindFirstChildWhichIsA("VehicleSeat", true)
+    if s then return s end
+    if h and tick() - seatScanAt > 0.6 then
+        seatScanAt = tick()
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("VehicleSeat") and d.Occupant == h then
+                seatCache = d
+                return d
+            end
         end
+        seatCache = nil
     end
+    if seatCache and seatCache.Parent and seatCache.Occupant == h then return seatCache end
     return nil
 end
 
@@ -513,12 +542,12 @@ local diagLabel = mk("TextLabel", {
 local diag = {}
 local function diagDraw()
     diagLabel.Text = table.concat({
-        "remotes: " .. tostring(diag.remotes or "-"),
-        "conveyor: " .. tostring(diag.conveyor or "-"),
+        "pizzaplanet: " .. tostring(diag.pp or "-"),
+        "conveyor: " .. tostring(diag.conv or "-"),
         "box: " .. tostring(diag.box or 0),
+        "säte: " .. tostring(diag.seat or "-"),
+        "remotes: " .. tostring(diag.remotes or "-"),
         "kund: " .. tostring(diag.cust or "-"),
-        "metod: " .. tostring(diag.mode or "-"),
-        "jobb: " .. tostring(diag.job or "saknas"),
         "fel: " .. tostring(diag.err or "-"),
     }, "\n")
 end
@@ -532,20 +561,23 @@ local function status(t) statusLabel.Text = t end
 local blox = { takeFn = nil, deliverEv = {}, uiMode = "none" }
 
 local function pizzaPlanet()
-    return workspace:FindFirstChild("PizzaPlanet")
+    local direct = workspace:FindFirstChild("PizzaPlanet")
+    if direct then return direct end
+    local hits = deepFind(workspace, function(i) return nameHas(i, "pizzaplanet") end, 6)
+    return hits[1]
 end
 
 local function conveyor()
     local pp = pizzaPlanet()
-    if not pp then return nil end
-    local c = pp:FindFirstChild("Conveyor")
-    if not c then
-        for _, d in ipairs(pp:GetDescendants()) do
-            if d.Name == "MovingBoxes" then return d end
-        end
-        return nil
+    if pp then
+        local mb = deepFind(pp, function(i) return i.Name == "MovingBoxes" end, 7)[1]
+        if mb then return mb end
+        local c = deepFind(pp, function(i) return nameHas(i, "conveyor") end, 7)[1]
+        if c then return c end
+        local b = deepFind(pp, function(i) return nameHas(i, "pizzabox", "pizza box") end, 7)[1]
+        if b then return b.Parent end
     end
-    return c:FindFirstChild("MovingBoxes") or c
+    return deepFind(workspace, function(i) return i.Name == "MovingBoxes" end, 7)[1]
 end
 
 local function boxCount()
@@ -558,13 +590,22 @@ local function boxCount()
     return n
 end
 
+local function firstBox()
+    local mb = conveyor()
+    if not mb then return nil end
+    for _, d in ipairs(mb:GetChildren()) do
+        if d:IsA("Model") or d:IsA("BasePart") then return d end
+    end
+    return nil
+end
+
 local function heldBox()
     local c = lp.Character
     if not c then return nil end
     local b = c:FindFirstChild("Pizza Box")
     if b then return b end
     for _, d in ipairs(c:GetChildren()) do
-        if d:IsA("Tool") and d.Name:lower():find("pizza") then return d end
+        if d:IsA("Tool") and nameHas(d, "pizza") then return d end
     end
     return nil
 end
@@ -577,8 +618,7 @@ local function scanRemotes()
     end
     local function score(x)
         local n = x.Name:lower()
-        if n == "datafunction" then return 0 end
-        if n == "dataevent" then return 0 end
+        if n == "datafunction" or n == "dataevent" then return 0 end
         if n:find("data") then return 1 end
         if n:find("job") or n:find("pizza") or n:find("item") then return 2 end
         return 3
@@ -590,7 +630,6 @@ local function scanRemotes()
     diag.remotes = #fn .. "/" .. #ev
 end
 
--- Ta box via remote
 local function takeBoxViaRemote(box)
     local fns = {}
     if blox.takeFn then table.insert(fns, blox.takeFn) end
@@ -627,7 +666,6 @@ local function dropLeftover()
     end
 end
 
--- UI-reserv
 local function fireButton(btn)
     if not btn or not btn:IsA("GuiButton") or not btn.Visible then return false end
     local gc = gfn("getconnections")
@@ -668,7 +706,6 @@ local function interactUI()
     return n
 end
 
--- Gångväg
 local function walkTo(pos, timeout)
     local h, r = hum(), root()
     if not h or not r or not pos then return false end
@@ -722,17 +759,77 @@ local function removeMoped()
     if not c then return end
     local m = c:FindFirstChild("Delivery Moped")
     if m then pcall(function() m:Destroy() end) end
-    local pp = pizzaPlanet()
-    local ring = pp and pp:FindFirstChild("Ring")
-    if ring then pcall(function() ring:Destroy() end) end
 end
 
-local function atJob()
-    local pp, r = pizzaPlanet(), root()
-    if not pp or not r then return false end
-    local p = pp:FindFirstChildWhichIsA("BasePart", true)
-    if not p then return false end
-    return (p.Position - r.Position).Magnitude < 70
+------------------------------------------------------------
+-- VÄRLDSSKANNER
+------------------------------------------------------------
+local scanBox = mk("TextBox", {
+    Size = UDim2.new(1, 0, 0, 300),
+    BackgroundColor3 = Color3.fromRGB(14, 14, 17),
+    BorderSizePixel = 0,
+    Font = Enum.Font.Code,
+    TextSize = 10,
+    TextColor3 = Color3.fromRGB(190, 190, 205),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    TextWrapped = true,
+    ClearTextOnFocus = false,
+    TextEditable = true,
+    MultiLine = true,
+    Text = "tryck Skanna världen",
+    LayoutOrder = 2,
+    ZIndex = 7,
+}, card(pJob, "Skannerapport", 340))
+
+local function scanWorld()
+    local out = {}
+    local function add(s) if #out < 120 then table.insert(out, s) end end
+
+    add("== workspace-barn ==")
+    local kids = workspace:GetChildren()
+    for i = 1, math.min(#kids, 40) do
+        add("  " .. kids[i].ClassName .. " : " .. kids[i].Name)
+    end
+    add("  antal: " .. #kids)
+
+    add("== pizza-träffar ==")
+    local hits = deepFind(workspace, function(i) return nameHas(i, "pizza") end, 8)
+    add("  antal: " .. #hits)
+    for i = 1, math.min(#hits, 30) do
+        add("  " .. hits[i]:GetFullName() .. " [" .. hits[i].ClassName .. "]")
+    end
+
+    add("== conveyor-träffar ==")
+    local cv = deepFind(workspace, function(i) return nameHas(i, "conveyor", "movingboxes", "box") end, 8)
+    add("  antal: " .. #cv)
+    for i = 1, math.min(#cv, 25) do
+        add("  " .. cv[i]:GetFullName() .. " [" .. cv[i].ClassName .. "]")
+    end
+
+    add("== locations ==")
+    local env = workspace:FindFirstChild("Environment")
+    local locs = env and env:FindFirstChild("Locations")
+    if locs then
+        for i, d in ipairs(locs:GetChildren()) do
+            if i > 30 then break end
+            add("  " .. d.Name)
+        end
+    else
+        add("  Environment.Locations saknas")
+    end
+
+    add("== karaktär ==")
+    local c = lp.Character
+    if c then
+        for _, d in ipairs(c:GetChildren()) do add("  " .. d.ClassName .. " : " .. d.Name) end
+        local h = c:FindFirstChildOfClass("Humanoid")
+        add("  SeatPart: " .. (h and h.SeatPart and h.SeatPart:GetFullName() or "nil"))
+    else
+        add("  ingen karaktär")
+    end
+
+    scanBox.Text = table.concat(out, "\n")
 end
 
 ------------------------------------------------------------
@@ -745,54 +842,51 @@ local function farmLoop()
     task.spawn(function()
         while CFG.farmOn and not S.dead do
             local ok, err = pcall(function()
+                local pp = pizzaPlanet()
+                local cv = conveyor()
+                diag.pp = pp and pp.Name or "saknas"
+                diag.conv = cv and cv:GetFullName() or "saknas"
                 diag.box = boxCount()
+                diag.seat = getSeat() and getSeat().Name or "-"
                 diag.cust = "-"
-                diag.mode = blox.uiMode
                 diag.err = "-"
                 diagDraw()
 
                 removeMoped()
 
-                if not atJob() and not heldBox() then
-                    status("går till Pizza Planet")
-                    local pp = pizzaPlanet()
-                    local p = pp and pp:FindFirstChildWhichIsA("BasePart", true)
-                    if p then goTo(p.Position, 30) end
-                    task.wait(0.8)
+                if pp and not heldBox() then
+                    local part = pp:FindFirstChildWhichIsA("BasePart", true)
+                    local r = root()
+                    if part and r and (part.Position - r.Position).Magnitude > 70 then
+                        status("går till Pizza Planet")
+                        goTo(part.Position, 30)
+                        task.wait(0.8)
+                    end
                 end
 
-                -- 1. Ta box
-                local box = heldBox()
-                if not box then
-                    local mb = conveyor()
-                    local raw = mb and mb:GetChildren()[1]
+                if not heldBox() then
+                    local raw = firstBox()
                     if raw then
-                        status("tar box via remote")
+                        status("tar box")
                         local customer = takeBoxViaRemote(raw)
                         if customer then
                             diag.cust = customer.Name
                             diagDraw()
-                            -- 2. Leverera
                             local hrp = customer:FindFirstChild("HumanoidRootPart")
                             if hrp and CFG.autoDeliver then
                                 status("går till " .. customer.Name)
                                 goTo(hrp.Position, 45)
                                 task.wait(0.4)
-                                if deliverViaRemote(customer) then
-                                    status("levererad")
-                                else
-                                    interactUI()
-                                end
+                                if not deliverViaRemote(customer) then interactUI() end
                                 task.wait(1)
                             end
                         else
-                            status("remote tog inte, testar klick")
-                            diag.mode = "klick"
+                            status("remote nekade, klick")
                             interactUI()
                             task.wait(0.6)
                         end
                     else
-                        status("ingen box på bandet")
+                        status("ingen box hittad")
                         interactUI()
                         task.wait(0.6)
                     end
@@ -825,14 +919,17 @@ button(pJob, "Kontroll", "Stoppa", Color3.fromRGB(110, 55, 55), function()
     CFG.farmOn = false
     status("stoppad")
 end)
-button(pJob, "Test", "Läs in remotes", Color3.fromRGB(50, 50, 60), function()
-    scanRemotes()
-    status("remotes: " .. tostring(diag.remotes))
+button(pJob, "Test", "Skanna världen", Color3.fromRGB(50, 42, 95), function()
+    status("skannar")
+    scanWorld()
+    diag.pp = pizzaPlanet() and "finns" or "saknas"
+    diag.conv = conveyor() and "finns" or "saknas"
+    diag.box = boxCount()
+    diag.seat = getSeat() and getSeat().Name or "-"
     diagDraw()
 end)
 button(pJob, "Test", "Ta en box (test)", Color3.fromRGB(50, 50, 60), function()
-    local mb = conveyor()
-    local raw = mb and mb:GetChildren()[1]
+    local raw = firstBox()
     if not raw then status("inget på bandet"); return end
     local c = takeBoxViaRemote(raw)
     status(c and ("kund: " .. c.Name) or "remote nekade")
@@ -847,13 +944,15 @@ toggle(pJob, "Gå istället för teleport", CFG.walkMode, function(v) CFG.walkMo
 task.spawn(function()
     task.wait(0.4)
     scanRemotes()
-    diag.conveyor = conveyor() and "finns" or "saknas"
+    diag.pp = pizzaPlanet() and "finns" or "saknas"
+    diag.conv = conveyor() and "finns" or "saknas"
+    diag.box = boxCount()
     diagDraw()
     status("redo")
     pcall(function()
         StarterGui:SetCore("SendNotification", {
-            Title = "Venice Suite v3.6",
-            Text = "Remotes: " .. tostring(diag.remotes) .. " | Conveyor: " .. tostring(diag.conveyor),
+            Title = "Venice Suite v3.7",
+            Text = "PizzaPlanet: " .. tostring(diag.pp) .. " | Conveyor: " .. tostring(diag.conv),
             Duration = 4,
         })
     end)
